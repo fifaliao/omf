@@ -83,9 +83,40 @@ Or manually:
 
 3. Verify it loaded by checking the logs for `[omf]` messages.
 
-### Configuration
+### Interactive Configuration
 
-`omf` creates a default config at `~/.config/opencode/omf.json` on first load. Edit it to customize:
+Use the `--configure` flag to discover, test, and select fallback models interactively:
+
+```bash
+./install.sh --configure --apply
+```
+
+This will:
+1. **Discover** models from your OpenCode config files (`oh-my-openagent.json`, `opencode.json`, `omf.json`)
+2. **Test** each model by making a lightweight API call to its provider endpoint
+3. **Show** results in a formatted table (✅ OK / ❌ Failed / ⚠️ No key)
+4. **Let you select** the fallback chain order interactively
+5. **Write** the optimized config to `omf.json`
+
+In non-interactive (CI/pipe) mode, it auto-generates an optimized chain using the built-in model capability database.
+
+### Auto-Optimization
+
+Enable automatic fallback chain optimization on every plugin load by setting `auto_optimize: true` in `omf.json`:
+
+```json
+{
+  "options": {
+    "auto_optimize": true
+  }
+}
+```
+
+When enabled, omf ranks discovered models by capability tier (premium > balanced > fast > cheap) and adjusts the fallback chain at runtime.
+
+### Manual Configuration
+
+Edit `~/.config/opencode/omf.json` to customize:
 
 ```json
 {

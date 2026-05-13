@@ -6,10 +6,11 @@ OpenCode plugin for unified model fallback management.
 
 ```
 omf/
-├── index.js      # Main plugin (ES module, ~355 lines)
-├── install.sh    # Installation script (dry-run by default, --apply to apply)
+├── index.js      # Main plugin (ES module, ~512 lines)
+├── install.sh    # Install script (--apply to apply, --configure for interactive setup)
 ├── package.json  # Minimal — no build/test scripts
-└── README.md     # Full documentation
+├── README.md     # Full documentation (EN)
+└── README.zh.md  # Documentation (CN)
 ```
 
 **No build step, no tests, no TypeScript.** Pure JavaScript ES module. **No external dependencies** — `npm install` is never needed.
@@ -49,11 +50,34 @@ export default async (input, options?: { configDir?: string }) => PluginHooks
 - `index.js:53-63` — `deepMerge` utility. Hand-rolled, 1 level deep, arrays replaced not merged.
 - `index.js:149-172` — error/status code extraction and retryable error classification
 - `index.js:65-89` — `loadConfig`: merges user config over defaults, writes default if missing
-- `install.sh` — must run with `--apply` flag to modify config files. Also supports online/piped install: `curl ... | bash -s -- --apply`
+- `index.js:48-100` — `OMO_MODEL_DB`: built-in model capability database with `classify()`, `rank()`, `optimize()`
+- `index.js:193-256` — `discoverAvailableModels()`: scans oh-my-openagent.json and opencode.json for model strings
+- `index.js:258-297` — `autoOptimizeConfig()`: ranks discovered models by tier (premium>balanced>fast>cheap), updates fallback chain at runtime
+- `install.sh` — `--apply` to apply, `--configure` for interactive model selection. Supports online/piped install: `curl ... | bash -s -- --apply`
+
+## Model Capability Database
+
+`OMO_MODEL_DB` in `index.js` classifies models into 4 tiers:
+
+| Tier | Score | Examples |
+|---|---|---|
+| premium | 100 | big-pickle, gpt-5, claude-sonnet-4, claude-opus |
+| balanced | 80 | claude-sonnet, gpt-4, gpt-4o, gemini-pro, deepseek-v3 |
+| fast | 60 | claude-haiku, gpt-4-mini, gemini-flash, deepseek-chat |
+| cheap | 40 | gpt-3.5, mixtral, llama |
+
+Enable auto-optimization by setting `auto_optimize: true` in `omf.json`.
 
 ## Common Tasks
 
 **Add a new known agent name:** Edit `AGENT_NAMES` array at `index.js:129-133`
+
+**Add/update model capability tier:** Edit `OMO_MODEL_DB.tiers` patterns in `index.js:48-100`
+
+**Run interactive model config:**
+```bash
+./install.sh --configure --apply
+```
 
 **Change retryable HTTP status codes:** Edit `config.options.retry_on_errors` in `~/.config/opencode/omf.json`
 

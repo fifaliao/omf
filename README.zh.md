@@ -79,9 +79,40 @@ chmod +x install.sh
 
 3. 查看日志中是否包含 `[omf]` 消息以确认加载成功。
 
-### 配置
+### 交互式配置
 
-`omf` 在首次加载时会创建默认配置文件 `~/.config/opencode/omf.json`。编辑它以自定义：
+使用 `--configure` 标志可以交互式地发现、测试和选择 fallback 模型：
+
+```bash
+./install.sh --configure --apply
+```
+
+该流程将：
+1. **发现** — 从 OpenCode 配置文件（`oh-my-openagent.json`、`opencode.json`、`omf.json`）中读取模型
+2. **测试** — 对每个模型进行轻量级 API 调用，验证其连通性
+3. **展示** — 以表格形式显示测试结果（✅ 正常 / ❌ 失败 / ⚠️ 无密钥）
+4. **选择** — 让你交互式地排列 fallback 链顺序
+5. **写入** — 将优化后的配置保存到 `omf.json`
+
+在非交互模式（CI/管道）下，会自动使用内置模型能力数据库生成优化链。
+
+### 自动优化
+
+在 `omf.json` 中设置 `auto_optimize: true` 可在每次插件加载时自动优化 fallback 链：
+
+```json
+{
+  "options": {
+    "auto_optimize": true
+  }
+}
+```
+
+启用后，omf 会按能力层级（premium > balanced > fast > cheap）对发现的模型进行排名，并在运行时调整 fallback 链。
+
+### 手动配置
+
+编辑 `~/.config/opencode/omf.json` 进行自定义：
 
 ```json
 {

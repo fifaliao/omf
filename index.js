@@ -26,25 +26,90 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const defaultConfig = {
   fallback_models: {
-    /* Fallback chain for manual sessions (no agent context) */
     default: [
       'opencode/big-pickle',
       'axon/gpt-5.4',
       'axon/claude-sonnet',
       'axon/deepseek',
     ],
-    /*
-     * Per-agent overrides written to oh-my-openagent.json on plugin load.
-     * Agent sessions use oh-my-opencode's native runtime-fallback with these models.
-     * Omit an agent to leave its existing fallback_models untouched.
-     */
     agents: {},
   },
   options: {
-    max_retries: 3,            // max fallback attempts per session
-    cooldown_seconds: 30,      // seconds before retrying a failed model
+    max_retries: 3,
+    cooldown_seconds: 30,
     retry_on_errors: [429, 500, 502, 503, 504],
-    notify_on_fallback: true,  // show toast when fallback triggers
+    notify_on_fallback: true,
+    auto_optimize: false,
+  },
+};
+
+// ─── Built-in Model Capability Database ──────────────────────────────────────
+
+const OMO_MODEL_DB = {
+  tiers: [
+    {
+      name: 'premium',
+      label: 'Best Reasoning/Coding',
+      patterns: [/^opencode\/big-pickle$/, /^axon\/gpt-5/, /axon\/claude-sonnet-4/, /axon\/claude-opus/],
+      score: 100,
+    },
+    {
+      name: 'balanced',
+      label: 'Balanced Performance',
+      patterns: [/^axon\/claude-sonnet(?!-4)/, /^axon\/gpt-4[^.]/, /gpt-4o/, /gemini-pro/, /deepseek-v3/, /deepseek-r1/],
+      score: 80,
+    },
+    {
+      name: 'fast',
+      label: 'Fast & Cheap',
+      patterns: [/claude-haiku/, /gpt-4-mini/, /gpt-4\.1-nano/, /gemini-flash/, /deepseek-chat/, /deepseek-coder/],
+      score: 60,
+    },
+    {
+      name: 'cheap',
+      label: 'Fallback',
+      patterns: [/gpt-3\.5/, /mixtral/, /llama/, /command/, /dbrx/],
+      score: 40,
+    },
+  ],
+
+  classify(modelStr) {
+    if (typeof modelStr !== 'string') return null;
+    for (const tier of this.tiers) {
+      for (const pattern of tier.patterns) {
+        if (pattern.test(modelStr)) {
+          return { tier: tier.name, score: tier.score, name: tier.label };
+        }
+      }
+    }
+    return null;
+  },
+
+  rank(models) {
+    const categorized = [];
+    const unknown = [];
+
+    for (const model of models) {
+      const classification = this.classify(model);
+      if (classification) {
+        categorized.push({ model, ...classification });
+      } else {
+        unknown.push(model);
+      }
+    }
+
+    categorized.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.model.localeCompare(b.model);
+    });
+
+    return [...categorized.map((c) => c.model), ...unknown];
+  },
+
+  optimize(availableModels, maxModels = 6) {
+    const unique = [...new Set(availableModels)];
+    const ranked = this.rank(unique);
+    return ranked.slice(0, maxModels);
   },
 };
 
@@ -75,7 +140,6 @@ function loadConfig(configDir) {
       console.error(`[omf] Failed to parse ${configPath}:`, e.message);
     }
   } else {
-    // Write default config for user to edit
     try {
       mkdirSync(configDir, { recursive: true });
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + '\n', 'utf-8');
@@ -124,6 +188,114 @@ function writeAgentFallbacks(configDir, config) {
   }
 }
 
+// ─── Model Discovery & Auto-Optimization ───────────────────────────────────────
+
+function discoverAvailableModels(configDir) {
+  const models = new Set();
+
+  const agentConfigPath = join(configDir, 'oh-my-openagent.json');
+  if (existsSync(agentConfigPath)) {
+    try {
+      const raw = readFileSync(agentConfigPath, 'utf-8');
+      const agentConfig = JSON.parse(raw);
+      const agents = agentConfig.agents || {};
+
+      for (const agent of Object.values(agents)) {
+        if (agent.model && typeof agent.model === 'string') {
+          models.add(agent.model);
+        }
+        if (Array.isArray(agent.fallback_models)) {
+          for (const model of agent.fallback_models) {
+            if (typeof model === 'string') {
+              models.add(model);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[omf] Failed to read oh-my-openagent.json: ${e.message}`);
+    }
+  }
+
+  const opencodeConfigPath = join(configDir, 'opencode.json');
+  if (existsSync(opencodeConfigPath)) {
+    try {
+      const raw = readFileSync(opencodeConfigPath, 'utf-8');
+      const opencodeConfig = JSON.parse(raw);
+
+      function extractModels(obj) {
+        if (!obj || typeof obj !== 'object') return;
+        if (obj.model && typeof obj.model === 'string') {
+          models.add(obj.model);
+        }
+        if (Array.isArray(obj.models)) {
+          for (const m of obj.models) {
+            if (typeof m === 'string') models.add(m);
+            else if (typeof m === 'object' && m.id) models.add(m.id);
+          }
+        }
+        if (Array.isArray(obj.fallback_models)) {
+          for (const m of obj.fallback_models) {
+            if (typeof m === 'string') models.add(m);
+          }
+        }
+        for (const value of Object.values(obj)) {
+          if (value && typeof value === 'object') {
+            extractModels(value);
+          }
+        }
+      }
+
+      extractModels(opencodeConfig);
+    } catch (e) {
+      console.log(`[omf] Failed to read opencode.json: ${e.message}`);
+    }
+  }
+
+  return [...models];
+}
+
+function autoOptimizeConfig(configDir, config) {
+  if (!config.options?.auto_optimize) {
+    return;
+  }
+
+  try {
+    const availableModels = discoverAvailableModels(configDir);
+
+    if (availableModels.length === 0) {
+      console.log(`[omf] No models found in configs to optimize`);
+      return;
+    }
+
+    const optimizedChain = OMO_MODEL_DB.optimize(availableModels, 6);
+    const currentChain = config.fallback_models?.default || [];
+
+    const currentSorted = [...currentChain].sort().join(',');
+    const optimizedSorted = [...optimizedChain].sort().join(',');
+
+    if (currentSorted === optimizedSorted) {
+      console.log(`[omf] Auto-optimize: fallback chain unchanged`);
+      return;
+    }
+
+    config.fallback_models.default = optimizedChain;
+    console.log(`[omf] Auto-optimized fallback chain: [${optimizedChain.join(', ')}]`);
+
+    const configPath = join(configDir, 'omf.json');
+    if (existsSync(configPath)) {
+      try {
+        writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        console.log(`[omf] Saved optimized config to omf.json`);
+      } catch (e) {
+        console.error(`[omf] Failed to write optimized config: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.error(`[omf] Auto-optimization failed: ${e.message}`);
+  }
+}
+
 // ─── Agent name detection (mirrors oh-my-opencode's logic) ────────────────────
 
 const AGENT_NAMES = [
@@ -148,12 +320,9 @@ function isManualSession(sessionID) {
 
 function extractStatusCode(error) {
   if (!error) return undefined;
-  // ApiError
   if (error.data?.statusCode) return error.data.statusCode;
-  // Direct status field
   if (error.status) return error.status;
   if (error.statusCode) return error.statusCode;
-  // Try to extract from message
   const match = typeof error.data?.message === 'string'
     ? error.data.message.match(/\b(\d{3})\b/)
     : undefined;
@@ -164,9 +333,7 @@ function isRetryableError(error, retryOnErrors) {
   if (!error) return false;
   const statusCode = extractStatusCode(error);
   if (statusCode && retryOnErrors.includes(statusCode)) return true;
-  // Provider auth errors are not retryable
   if (error.name === 'ProviderAuthError') return false;
-  // Abort errors are not retryable  
   if (error.name === 'MessageAbortedError') return false;
   return false;
 }
@@ -189,10 +356,10 @@ const plugin = async (input, options) => {
   const configDir = options?.configDir || join(process.env.HOME || '/root', '.config', 'opencode');
   const config = loadConfig(configDir);
 
-  // Write agent-specific fallback_models to oh-my-openagent.json
   writeAgentFallbacks(configDir, config);
 
-  // Per-session fallback state
+  autoOptimizeConfig(configDir, config);
+
   const sessionStates = new Map();
 
   function getOrCreateSessionState(sessionID) {
@@ -201,7 +368,7 @@ const plugin = async (input, options) => {
       state = {
         fallbackIndex: 0,
         attemptCount: 0,
-        failedModels: new Map(), // modelName → timestamp
+        failedModels: new Map(),
         pending: false,
       };
       sessionStates.set(sessionID, state);
@@ -218,7 +385,7 @@ const plugin = async (input, options) => {
   async function tryManualFallback(ctx, sessionID) {
     const state = getOrCreateSessionState(sessionID);
 
-    if (state.pending) return; // already handling
+    if (state.pending) return;
     if (state.attemptCount >= config.options.max_retries) {
       console.log(`[omf] ${sessionID}: max retries (${config.options.max_retries}) reached`);
       sessionStates.delete(sessionID);
@@ -228,7 +395,6 @@ const plugin = async (input, options) => {
     const models = config.fallback_models.default;
     if (!models || models.length === 0) return;
 
-    // Find next available model (skip cooldown + invalid)
     let nextModel = null;
     while (state.fallbackIndex < models.length) {
       const candidate = models[state.fallbackIndex];
@@ -249,7 +415,6 @@ const plugin = async (input, options) => {
     state.attemptCount++;
 
     try {
-      // 1. Get last user message
       const messagesResp = await ctx.client.session.messages({
         path: { id: sessionID },
         query: { directory: ctx.directory },
@@ -274,10 +439,8 @@ const plugin = async (input, options) => {
         return;
       }
 
-      // 2. Abort failed request
       await ctx.client.session.abort({ path: { id: sessionID } });
 
-      // 3. Re-prompt with fallback model
       const parsed = parseModelString(nextModel);
       await ctx.client.session.promptAsync({
         path: { id: sessionID },
@@ -290,10 +453,8 @@ const plugin = async (input, options) => {
 
       console.log(`[omf] ${sessionID}: fallback → ${nextModel}`);
 
-      // Toast notification
       if (config.options.notify_on_fallback) {
         try {
-          // Attempt via client if available; otherwise silently skip
           if (ctx.client.tui?.showToast) {
             await ctx.client.tui.showToast({
               body: {
@@ -310,7 +471,6 @@ const plugin = async (input, options) => {
       console.log(`[omf] ${sessionID}: fallback attempt failed:`, e.message);
       state.failedModels.set(nextModel, Date.now());
       state.pending = false;
-      // Try next model recursively
       return tryManualFallback(ctx, sessionID);
     }
 
@@ -321,7 +481,6 @@ const plugin = async (input, options) => {
     event: async ({ event }) => {
       if (!config.options.retry_on_errors?.length) return;
 
-      // ── message.updated: catch assistant errors ──────────────────────────
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         if (!info || info.role !== 'assistant') return;
@@ -336,7 +495,6 @@ const plugin = async (input, options) => {
         await tryManualFallback(input, sessionID);
       }
 
-      // ── session.error: catch session-level errors ────────────────────────
       if (event.type === 'session.error') {
         const props = event.properties;
         if (!props?.sessionID || !isManualSession(props.sessionID)) return;
@@ -344,12 +502,11 @@ const plugin = async (input, options) => {
         const error = props.error;
         if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
 
-        // Don't immediately retry here — message.updated will fire with more detail.
-        // Just mark the session so we're ready.
         getOrCreateSessionState(props.sessionID);
       }
     },
   };
 };
 
+export { OMO_MODEL_DB, discoverAvailableModels };
 export default plugin;
