@@ -37,6 +37,20 @@ Manual session
 
 ## Installation
 
+### Online install (one-liner)
+
+Install directly from GitHub — no local clone needed:
+
+```bash
+# Preview (no changes)
+curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash
+
+# Apply
+curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash -s -- --apply
+```
+
+The script auto-detects online mode, clones the repo to `~/.config/opencode/plugins/omf`, registers the plugin, and creates the default config.
+
 ### Local install (development)
 
 ```bash

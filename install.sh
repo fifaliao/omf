@@ -5,20 +5,85 @@ set -euo pipefail
 #  omf (oh-my-fallback) — install / update script
 # ─────────────────────────────────────────────────────────────
 # Usage:
-#   ./install.sh              # dry-run (preview only)
-#   ./install.sh --apply      # apply changes
-#   ./install.sh --help       # this message
+#   Local:  ./install.sh              # dry-run (preview only)
+#           ./install.sh --apply      # apply changes
+#
+#   Online: curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash              # dry-run
+#           curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash -s -- --apply # apply
+#
+# Options:
+#   --apply       Apply changes (default: dry-run)
+#   --repo=<url>  Git repo URL for online install (default: origin remote)
+#   --help        Show this message
 # ─────────────────────────────────────────────────────────────
 
-OMF_SRC="$(cd "$(dirname "$0")" && pwd)"
+# ── Parse args ───────────────────────────────────────────────
+APPLY=false
+CUSTOM_REPO=""
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=true ;;
+    --repo=*) CUSTOM_REPO="${arg#*=}" ;;
+    --help)
+      sed -n '/^# ──.*Usage/,/^# ──/p' "$0" | grep '^# ' | sed 's/^# //'
+      exit 0
+      ;;
+  esac
+done
+
+# ── Detect mode (local checkout vs online/piped) ─────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/index.js" ]; then
+  LOCAL_MODE=true
+  OMF_SRC="$SCRIPT_DIR"
+else
+  LOCAL_MODE=false
+fi
+
 CONFIG_DIR="${HOME}/.config/opencode"
 CONFIG_FILE="${CONFIG_DIR}/opencode.json"
 OMF_CONFIG="${CONFIG_DIR}/omf.json"
+PLUGIN_DIR="${CONFIG_DIR}/plugins/omf"
+
+# Determine repo URL: use --repo flag, then origin remote, then default
+if $LOCAL_MODE; then
+  REPO_URL="${CUSTOM_REPO:-$(git -C "$OMF_SRC" config --get remote.origin.url 2>/dev/null || true)}"
+fi
+REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"
 
 echo "== omf installer =="
-echo "  Source:      ${OMF_SRC}"
+echo "  Source:      ${OMF_SRC:-"(to be cloned)"}"
+echo "  Mode:        $($LOCAL_MODE && echo "local" || echo "online")"
 echo "  Config dir:  ${CONFIG_DIR}"
+
+if ! $LOCAL_MODE; then
+  echo "  Repo:        ${REPO_URL}"
+  echo "  Plugins dir: ${PLUGIN_DIR}"
+fi
 echo ""
+
+# ── Online mode: clone or update repo ───────────────────────
+if ! $LOCAL_MODE; then
+  if [ -d "$PLUGIN_DIR" ]; then
+    echo "  [UPDATE] Fetching latest omf..."
+    if $APPLY; then
+      git -C "$PLUGIN_DIR" pull --ff-only --depth 1 origin main 2>/dev/null \
+        || git -C "$PLUGIN_DIR" pull --ff-only --depth 1 origin master 2>/dev/null \
+        || echo "  [WARN]  Update failed — try removing ${PLUGIN_DIR} and re-running"
+    else
+      echo "  [DRY-RUN] Would update ${PLUGIN_DIR}"
+    fi
+  else
+    echo "  [CLONE]  Cloning omf from ${REPO_URL}..."
+    if $APPLY; then
+      mkdir -p "${CONFIG_DIR}/plugins"
+      git clone --depth 1 "${REPO_URL}" "$PLUGIN_DIR"
+    else
+      echo "  [DRY-RUN] Would clone to ${PLUGIN_DIR}"
+    fi
+  fi
+  OMF_SRC="$PLUGIN_DIR"
+fi
 
 # ── 1. Ensure config directory exists ────────────────────────
 mkdir -p "${CONFIG_DIR}"
@@ -26,7 +91,7 @@ mkdir -p "${CONFIG_DIR}"
 # ── 2. Create default omf.json if absent ─────────────────────
 if [ ! -f "${OMF_CONFIG}" ]; then
   echo "  [CREATE] ${OMF_CONFIG}"
-  if [ "${1:-}" = "--apply" ]; then
+  if $APPLY; then
     cat > "${OMF_CONFIG}" << 'OMF_JSON'
 {
   "fallback_models": {
@@ -52,27 +117,21 @@ else
 fi
 
 # ── 3. Add plugin entry to opencode.json ─────────────────────
-#     We add a file:// reference for the local plugin directory.
 PLUGIN_ENTRY="file://${OMF_SRC}"
 
 if [ ! -f "${CONFIG_FILE}" ]; then
   echo "  [WARN]  ${CONFIG_FILE} not found — create it manually with:"
   echo '          { "plugin": ["'"${PLUGIN_ENTRY}"'"] }'
 else
-  # Check if already present
   if grep -qF "${PLUGIN_ENTRY}" "${CONFIG_FILE}" 2>/dev/null; then
     echo "  [OK]     Plugin already registered in opencode.json"
   else
     echo "  [EDIT]   Add to plugin array in ${CONFIG_FILE}:"
     echo "           \"${PLUGIN_ENTRY}\""
-    if [ "${1:-}" = "--apply" ]; then
-      # Use temporary file to insert plugin entry before the last entry
+    if $APPLY; then
       TMP=$(mktemp)
-      # Insert plugin entry as second-to-last element (before the closing bracket)
-      # Works for simple arrays - assumes plugin is last array in the file
       awk -v entry="\"${PLUGIN_ENTRY}\"" '
         /\]/ && !done {
-          # Ensure no trailing comma issues
           sub(/\],$/, ",")
           print "    " entry ","
           print "  ]"
@@ -87,7 +146,7 @@ else
 fi
 
 echo ""
-if [ "${1:-}" = "--apply" ]; then
+if $APPLY; then
   echo "== Install complete. Restart OpenCode for changes to take effect. =="
 else
   echo "== Dry-run complete. Run with --apply to make changes. =="
