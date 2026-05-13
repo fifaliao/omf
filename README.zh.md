@@ -1,5 +1,10 @@
 # omf — Oh My Fallback
 
+<p align="center">
+  <a href="README.md"><strong>🇬🇧 English</strong></a> ·
+  <a href="README.zh.md"><strong>🇨🇳 中文</strong></a>
+</p>
+
 [OpenCode](https://opencode.ai) 的统一模型故障回退管理插件。
 
 ## 概述
