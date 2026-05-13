@@ -1,0 +1,12 @@
+{
+  "name": "omf",
+  "version": "0.1.0",
+  "description": "Oh My Fallback — unified model fallback management for OpenCode",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "keywords": ["opencode", "plugin", "fallback", "model"],
+  "license": "MIT"
+}
