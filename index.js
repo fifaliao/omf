@@ -22,6 +22,20 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ─── Cross-platform config path resolution ────────────────────────────────────
+
+function getOpenCodeConfigDir() {
+  // Windows: %APPDATA%\opencode\
+  // Linux/macOS: $XDG_CONFIG_HOME/opencode or ~/.config/opencode
+  if (process.env.APPDATA) {
+    return join(process.env.APPDATA, 'opencode');
+  }
+  if (process.env.XDG_CONFIG_HOME) {
+    return join(process.env.XDG_CONFIG_HOME, 'opencode');
+  }
+  return join(process.env.HOME || '/root', '.config', 'opencode');
+}
+
 // ─── Default configuration ────────────────────────────────────────────────────
 
 const defaultConfig = {
@@ -353,7 +367,7 @@ function parseModelString(modelStr) {
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 const plugin = async (input, options) => {
-  const configDir = options?.configDir || join(process.env.HOME || '/root', '.config', 'opencode');
+  const configDir = options?.configDir || getOpenCodeConfigDir();
   const config = loadConfig(configDir);
 
   writeAgentFallbacks(configDir, config);

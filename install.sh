@@ -52,7 +52,7 @@ else
   LOCAL_MODE=false
 fi
 
-CONFIG_DIR="${HOME}/.config/opencode"
+CONFIG_DIR="$(detect_config_dir)"
 CONFIG_FILE="${CONFIG_DIR}/opencode.json"
 OMF_CONFIG="${CONFIG_DIR}/omf.json"
 OH_MY_OPENAGENT="${CONFIG_DIR}/oh-my-openagent.json"
@@ -63,6 +63,19 @@ if $LOCAL_MODE; then
   REPO_URL="${CUSTOM_REPO:-$(git -C "$OMF_SRC" config --get remote.origin.url 2>/dev/null || true)}"
 fi
 REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"
+
+# ── Cross-platform config directory ─────────────────────────
+# Windows: %APPDATA%\opencode\
+# Linux/macOS: $XDG_CONFIG_HOME/opencode or ~/.config/opencode
+detect_config_dir() {
+  if [ -n "$APPDATA" ]; then
+    echo "${APPDATA}/opencode"
+  elif [ -n "$XDG_CONFIG_HOME" ]; then
+    echo "${XDG_CONFIG_HOME}/opencode"
+  else
+    echo "${HOME}/.config/opencode"
+  fi
+}
 
 # ── Check jq availability ─────────────────────────────────────
 has_jq() {
@@ -541,9 +554,9 @@ configure_mode() {
     echo -e "${C_YELLOW}No models found in config files.${C_RESET}"
     echo ""
     echo "To configure fallback models, add them to:"
-    echo "  - ~/.config/opencode/oh-my-openagent.json"
-    echo "  - ~/.config/opencode/omf.json"
-    echo "  - ~/.config/opencode/opencode.json"
+    echo "  - ${CONFIG_DIR}/oh-my-openagent.json"
+    echo "  - ${CONFIG_DIR}/omf.json"
+    echo "  - ${CONFIG_DIR}/opencode.json"
     echo ""
     echo "Or set API keys via environment variables:"
     echo "  OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY"
@@ -721,17 +734,41 @@ else
     echo "           \"${PLUGIN_ENTRY}\""
     if $APPLY; then
       TMP=$(mktemp)
-      awk -v entry="\"${PLUGIN_ENTRY}\"" '
-        /\]/ && !done {
-          sub(/\],$/, ",")
-          print "    " entry ","
-          print "  ]"
-          done=1
-          next
-        }
-        { print }
-      ' "${CONFIG_FILE}" > "${TMP}" && mv "${TMP}" "${CONFIG_FILE}"
-      echo "  [DONE]   Plugin entry added to opencode.json"
+
+      # Use jq if available (safest), else awk targeting only the "plugin" key
+      if has_jq; then
+        jq --arg entry "$PLUGIN_ENTRY" '.plugin += [$entry]' "${CONFIG_FILE}" > "${TMP}" \
+          && mv "${TMP}" "${CONFIG_FILE}" \
+          && echo "  [DONE]   Plugin entry added via jq"
+      else
+        # awk: insert into the "plugin" array only — never the first ] in the file
+        awk -v entry="\"${PLUGIN_ENTRY}\"" '
+          BEGIN { in_plugin = 0; done = 0 }
+
+          # Detect "plugin": [ line — start tracking
+          /"plugin"[[:space:]]*:[[:space:]]*\[/ {
+            in_plugin = 1
+            print
+            next
+          }
+
+          # Inside plugin section, at closing bracket: insert before it
+          in_plugin && /^[[:space:]]*\]/ && !done {
+            print "    " entry ","
+            print "  ]"
+            in_plugin = 0
+            done = 1
+            next
+          }
+
+          # Inside plugin section, line is NOT the closing bracket
+          in_plugin && !done { print; next }
+
+          # Already inserted — pass through
+          { print }
+        ' "${CONFIG_FILE}" > "${TMP}" && mv "${TMP}" "${CONFIG_FILE}"
+        echo "  [DONE]   Plugin entry added to opencode.json"
+      fi
     fi
   fi
 fi
