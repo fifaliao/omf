@@ -52,18 +52,6 @@ else
   LOCAL_MODE=false
 fi
 
-CONFIG_DIR="$(detect_config_dir)"
-CONFIG_FILE="${CONFIG_DIR}/opencode.json"
-OMF_CONFIG="${CONFIG_DIR}/omf.json"
-OH_MY_OPENAGENT="${CONFIG_DIR}/oh-my-openagent.json"
-PLUGIN_DIR="${CONFIG_DIR}/plugins/omf"
-
-# Determine repo URL: use --repo flag, then origin remote, then default
-if $LOCAL_MODE; then
-  REPO_URL="${CUSTOM_REPO:-$(git -C "$OMF_SRC" config --get remote.origin.url 2>/dev/null || true)}"
-fi
-REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"
-
 # ── Cross-platform config directory ─────────────────────────
 # Windows: %APPDATA%\opencode\
 # Linux/macOS: $XDG_CONFIG_HOME/opencode or ~/.config/opencode
@@ -76,6 +64,18 @@ detect_config_dir() {
     echo "${HOME}/.config/opencode"
   fi
 }
+
+CONFIG_DIR="$(detect_config_dir)"
+CONFIG_FILE="${CONFIG_DIR}/opencode.json"
+OMF_CONFIG="${CONFIG_DIR}/omf.json"
+OH_MY_OPENAGENT="${CONFIG_DIR}/oh-my-openagent.json"
+PLUGIN_DIR="${CONFIG_DIR}/plugins/omf"
+
+# Determine repo URL: use --repo flag, then origin remote, then default
+if $LOCAL_MODE; then
+  REPO_URL="${CUSTOM_REPO:-$(git -C "$OMF_SRC" config --get remote.origin.url 2>/dev/null || true)}"
+fi
+REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"}
 
 # ── Check jq availability ─────────────────────────────────────
 has_jq() {
