@@ -100,19 +100,27 @@ This will:
 
 In non-interactive (CI/pipe) mode, it auto-generates an optimized chain using the built-in model capability database.
 
-### In-Chat Configuration (TUI)
+### Interactive Configuration (TUI)
 
-Use the `/omf` command directly in OpenCode to configure without leaving the chat:
+The TUI configuration screen opens an interactive terminal menu using Node.js `readline`. Call it programmatically:
 
-```
-/omf              # Open interactive configuration menu
-/omf status       # Show current fallback chain and options
-/omf optimize     # Auto-optimize from available models
-/omf chain        # Manually enter fallback models
-/omf options      # Edit retry/cooldown settings
+```js
+import { runTUI } from 'omf';
+await runTUI(); // uses default config dir
+await runTUI('/custom/config/path'); // custom config dir
 ```
 
-The TUI uses your terminal's stdin/stdout for interactive prompts while staying inside the OpenCode session.
+Or use the shell installer's `--configure` flag for the same interactive flow:
+
+```bash
+./install.sh --configure --apply
+```
+
+The TUI supports:
+- **Show status** — view current fallback chain, per-agent overrides, and options
+- **Auto-optimize** — discover models from your configs and build an optimized chain
+- **Manual chain** — enter models one by one with format validation
+- **Edit options** — change max_retries, cooldown, auto_optimize, notify
 
 ### Auto-Optimization
 

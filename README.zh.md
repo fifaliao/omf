@@ -96,19 +96,27 @@ chmod +x install.sh
 
 在非交互模式（CI/管道）下，会自动使用内置模型能力数据库生成优化链。
 
-### 在聊天中配置（TUI）
+### 交互式配置（TUI）
 
-在 OpenCode 中直接使用 `/omf` 命令进行配置，无需离开对话：
+TUI 配置屏幕使用 Node.js `readline` 打开交互式终端菜单。可通过编程方式调用：
 
-```
-/omf              # 打开交互式配置菜单
-/omf status       # 显示当前 fallback 链和选项
-/omf optimize     # 从可用模型自动优化
-/omf chain        # 手动输入 fallback 模型
-/omf options      # 编辑重试/冷却设置
+```js
+import { runTUI } from 'omf';
+await runTUI(); // 使用默认配置目录
+await runTUI('/custom/config/path'); // 自定义配置目录
 ```
 
-TUI 使用终端的 stdin/stdout 进行交互式提示，同时保持在 OpenCode 会话内。
+或使用安装脚本的 `--configure` 标志获得相同的交互式流程：
+
+```bash
+./install.sh --configure --apply
+```
+
+TUI 支持：
+- **显示状态** — 查看当前 fallback 链、按 agent 覆盖和选项
+- **自动优化** — 从配置中发现模型并构建优化链
+- **手动配置链** — 逐个输入模型并验证格式
+- **编辑选项** — 修改 max_retries、cooldown、auto_optimize、notify
 
 ### 自动优化
 

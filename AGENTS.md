@@ -79,13 +79,15 @@ Enable auto-optimization by setting `auto_optimize: true` in `omf.json`.
 ./install.sh --configure --apply
 ```
 
-**Configure via OpenCode command:**
+**Run interactive TUI configuration:**
+```bash
+./install.sh --configure --apply
 ```
-/omf           # Open interactive menu
-/omf status    # Show current config
-/omf optimize  # Auto-optimize fallback chain
-/omf chain     # Manually set fallback chain
-/omf options   # Edit max_retries, cooldown, etc.
+
+**Programmatic TUI usage:**
+```js
+import { runTUI } from 'omf';
+await runTUI();
 ```
 
 **Change retryable HTTP status codes:** Edit `config.options.retry_on_errors` in `~/.config/opencode/omf.json`

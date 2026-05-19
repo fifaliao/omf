@@ -521,7 +521,6 @@ const plugin = async (input, options) => {
         getOrCreateSessionState(props.sessionID);
       }
     },
-    command: async ({ name, args }) => handleCommand({ name, args }),
   };
 };
 
