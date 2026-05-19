@@ -118,6 +118,18 @@ TUI 支持：
 - **手动配置链** — 逐个输入模型并验证格式
 - **编辑选项** — 修改 max_retries、cooldown、auto_optimize、notify
 
+### omf Skill（在聊天中配置）
+
+由 `install.sh --apply` 自动安装。该 skill 教导 OpenCode 如何处理聊天中的 `/omf` 命令，通过文件编辑工具直接修改 `omf.json`。试试：
+
+```
+/omf status      # 显示当前配置
+/omf optimize    # 自动发现并排序模型
+/omf add axon/deepseek  # 添加模型到链
+/omf remove 3    # 删除第 3 个模型
+/omf retries 5   # 设置 max_retries
+```
+
 ### 自动优化
 
 在 `omf.json` 中设置 `auto_optimize: true` 可在每次插件加载时自动优化 fallback 链：

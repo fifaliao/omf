@@ -90,6 +90,16 @@ import { runTUI } from 'omf';
 await runTUI();
 ```
 
+**omf Skill (in-chat `/omf` commands):**
+Installed automatically by `install.sh --apply`. The skill teaches OpenCode to handle `/omf` commands in the chat by directly editing `omf.json`. Try:
+```
+/omf status      # show current config
+/omf optimize    # auto-discover and rank models
+/omf add axon/deepseek  # add model to chain
+/omf remove 3    # remove model at position 3
+/omf retries 5   # set max_retries
+```
+
 **Change retryable HTTP status codes:** Edit `config.options.retry_on_errors` in `~/.config/opencode/omf.json`
 
 **Override config directory:** Pass `{ configDir: '/custom/path' }` as second arg to the plugin function

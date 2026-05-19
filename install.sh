@@ -773,6 +773,28 @@ else
   fi
 fi
 
+# ── 4. Install omf skill ──────────────────────────────────────
+SKILL_SRC="${OMF_SRC}/SKILL.md"
+SKILL_DIR="${CONFIG_DIR}/skills/omf"
+SKILL_DST="${SKILL_DIR}/SKILL.md"
+
+if [ -f "$SKILL_SRC" ]; then
+  if [ -f "$SKILL_DST" ]; then
+    echo "  [EXISTS]  omf skill (${SKILL_DST})"
+  else
+    echo "  [INSTALL] omf skill → ${SKILL_DST}"
+    if $APPLY; then
+      mkdir -p "${SKILL_DIR}"
+      cp "$SKILL_SRC" "$SKILL_DST"
+      echo "  [DONE]    Skill installed. Type \"/omf status\" in OpenCode to use."
+    else
+      echo "  [DRY-RUN] Would install skill to ${SKILL_DST}"
+    fi
+  fi
+else
+  echo "  [SKIP]    SKILL.md not found at ${SKILL_SRC}"
+fi
+
 echo ""
 if $APPLY; then
   echo "== Install complete. Restart OpenCode for changes to take effect. =="

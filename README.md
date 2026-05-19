@@ -122,6 +122,18 @@ The TUI supports:
 - **Manual chain** — enter models one by one with format validation
 - **Edit options** — change max_retries, cooldown, auto_optimize, notify
 
+### omf Skill (In-Chat Configuration)
+
+Installed automatically by `install.sh --apply`. The skill teaches OpenCode to handle `/omf` commands in the chat by directly editing `omf.json` using file tools. Try:
+
+```
+/omf status      # show current config
+/omf optimize    # auto-discover and rank models
+/omf add axon/deepseek  # add model to chain
+/omf remove 3    # remove model at position 3
+/omf retries 5   # set max_retries
+```
+
 ### Auto-Optimization
 
 Enable automatic fallback chain optimization on every plugin load by setting `auto_optimize: true` in `omf.json`:
