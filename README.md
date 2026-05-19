@@ -100,6 +100,20 @@ This will:
 
 In non-interactive (CI/pipe) mode, it auto-generates an optimized chain using the built-in model capability database.
 
+### In-Chat Configuration (TUI)
+
+Use the `/omf` command directly in OpenCode to configure without leaving the chat:
+
+```
+/omf              # Open interactive configuration menu
+/omf status       # Show current fallback chain and options
+/omf optimize     # Auto-optimize from available models
+/omf chain        # Manually enter fallback models
+/omf options      # Edit retry/cooldown settings
+```
+
+The TUI uses your terminal's stdin/stdout for interactive prompts while staying inside the OpenCode session.
+
 ### Auto-Optimization
 
 Enable automatic fallback chain optimization on every plugin load by setting `auto_optimize: true` in `omf.json`:

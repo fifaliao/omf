@@ -96,6 +96,20 @@ chmod +x install.sh
 
 在非交互模式（CI/管道）下，会自动使用内置模型能力数据库生成优化链。
 
+### 在聊天中配置（TUI）
+
+在 OpenCode 中直接使用 `/omf` 命令进行配置，无需离开对话：
+
+```
+/omf              # 打开交互式配置菜单
+/omf status       # 显示当前 fallback 链和选项
+/omf optimize     # 从可用模型自动优化
+/omf chain        # 手动输入 fallback 模型
+/omf options      # 编辑重试/冷却设置
+```
+
+TUI 使用终端的 stdin/stdout 进行交互式提示，同时保持在 OpenCode 会话内。
+
 ### 自动优化
 
 在 `omf.json` 中设置 `auto_optimize: true` 可在每次插件加载时自动优化 fallback 链：

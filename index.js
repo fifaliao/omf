@@ -20,6 +20,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createInterface } from 'readline';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -520,8 +521,226 @@ const plugin = async (input, options) => {
         getOrCreateSessionState(props.sessionID);
       }
     },
+    command: async ({ name, args }) => handleCommand({ name, args }),
   };
 };
 
-export { OMO_MODEL_DB, discoverAvailableModels };
+// ─── TUI Configuration via OpenCode command ─────────────────────────────────
+
+function readLine(prompt) {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+async function showStatus(config) {
+  console.log(`\n[omf] Current fallback chain:`);
+  (config.fallback_models?.default || []).forEach((m, i) => {
+    const cls = OMO_MODEL_DB.classify(m);
+    const label = cls ? ` (${cls.name})` : '';
+    console.log(`[omf]   ${i + 1}) ${m}${label}`);
+  });
+
+  const agents = config.fallback_models?.agents || {};
+  if (Object.keys(agents).length > 0) {
+    console.log(`[omf] Per-agent overrides:`);
+    for (const [agent, models] of Object.entries(agents)) {
+      console.log(`[omf]   ${agent}: ${models.join(', ')}`);
+    }
+  }
+
+  console.log(`[omf] Options: max_retries=${config.options?.max_retries}, ` +
+    `cooldown=${config.options?.cooldown_seconds}s, ` +
+    `auto_optimize=${config.options?.auto_optimize}`);
+}
+
+async function tuiAutoOptimize(configDir, config) {
+  console.log(`[omf] Scanning for available models...`);
+  const models = discoverAvailableModels(configDir);
+  if (models.length === 0) {
+    console.log(`[omf] No models found in config files.`);
+    return false;
+  }
+  console.log(`[omf] Discovered ${models.length} model(s): ${models.join(', ')}`);
+  const optimized = OMO_MODEL_DB.optimize(models, 6);
+  console.log(`[omf] Optimized chain: ${optimized.join(' → ')}`);
+  const ok = await readLine(`[omf] Apply this chain? (y/n): `);
+  if (ok.toLowerCase() === 'y') {
+    config.fallback_models.default = optimized;
+    const configPath = join(configDir, 'omf.json');
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    console.log(`[omf] Config saved to ${configPath}`);
+    return true;
+  }
+  return false;
+}
+
+async function tuiManualChain(configDir, config) {
+  console.log(`[omf] Enter models for the fallback chain, one per line.`);
+  console.log(`[omf] Format: provider/model (e.g., opencode/big-pickle)`);
+  console.log(`[omf] Type 'done' when finished, 'list' to see discovered models.\n`);
+
+  const newChain = [];
+  while (true) {
+    const line = await readLine(`[omf] model #${newChain.length + 1}> `);
+    const input = line.trim();
+    if (input.toLowerCase() === 'done') break;
+    if (input.toLowerCase() === 'list') {
+      const models = discoverAvailableModels(configDir);
+      if (models.length === 0) {
+        console.log(`[omf] No models discovered from configs.`);
+      } else {
+        models.forEach((m) => {
+          const cls = OMO_MODEL_DB.classify(m);
+          const label = cls ? ` (${cls.name})` : '';
+          console.log(`[omf]   ${m}${label}`);
+        });
+      }
+      continue;
+    }
+    if (input.includes('/')) {
+      newChain.push(input);
+      console.log(`[omf]   Added: ${input}`);
+    } else {
+      console.log(`[omf]   Invalid format. Use provider/model`);
+    }
+  }
+
+  if (newChain.length === 0) {
+    console.log(`[omf] Chain unchanged.`);
+    return false;
+  }
+
+  console.log(`\n[omf] New fallback chain:`);
+  newChain.forEach((m, i) => console.log(`[omf]   ${i + 1}) ${m}`));
+  const ok = await readLine(`\n[omf] Apply? (y/n): `);
+  if (ok.toLowerCase() === 'y') {
+    config.fallback_models.default = newChain;
+    const configPath = join(configDir, 'omf.json');
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    console.log(`[omf] Config saved to ${configPath}`);
+    return true;
+  }
+  return false;
+}
+
+async function tuiEditOptions(configDir, config) {
+  console.log(`[omf] Current options:`);
+  console.log(`[omf]   1) max_retries: ${config.options?.max_retries}`);
+  console.log(`[omf]   2) cooldown_seconds: ${config.options?.cooldown_seconds}`);
+  console.log(`[omf]   3) auto_optimize: ${config.options?.auto_optimize}`);
+  console.log(`[omf]   4) notify_on_fallback: ${config.options?.notify_on_fallback}`);
+  console.log(`[omf]   0) Back\n`);
+
+  const choice = await readLine(`[omf] Edit which option? (0-4): `);
+  switch (choice.trim()) {
+    case '1': {
+      const val = await readLine(`[omf] max_retries (current: ${config.options?.max_retries}): `);
+      const n = parseInt(val);
+      if (n > 0) config.options.max_retries = n;
+      break;
+    }
+    case '2': {
+      const val = await readLine(`[omf] cooldown_seconds (current: ${config.options?.cooldown_seconds}): `);
+      const n = parseInt(val);
+      if (n > 0) config.options.cooldown_seconds = n;
+      break;
+    }
+    case '3': {
+      const val = await readLine(`[omf] auto_optimize (true/false, current: ${config.options?.auto_optimize}): `);
+      if (val === 'true') config.options.auto_optimize = true;
+      if (val === 'false') config.options.auto_optimize = false;
+      break;
+    }
+    case '4': {
+      const val = await readLine(`[omf] notify_on_fallback (true/false, current: ${config.options?.notify_on_fallback}): `);
+      if (val === 'true') config.options.notify_on_fallback = true;
+      if (val === 'false') config.options.notify_on_fallback = false;
+      break;
+    }
+    case '0': return false;
+    default: console.log(`[omf] Invalid choice.`); return false;
+  }
+
+  const configPath = join(configDir, 'omf.json');
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  console.log(`[omf] Options updated.`);
+  return true;
+}
+
+async function runTUI(configDir) {
+  const config = loadConfig(configDir);
+
+  while (true) {
+    console.log(`\n[omf] ═══ omf Configuration ═══`);
+    console.log(`[omf]  1) Show status`);
+    console.log(`[omf]  2) Auto-optimize fallback chain`);
+    console.log(`[omf]  3) Manually set fallback chain`);
+    console.log(`[omf]  4) Edit options`);
+    console.log(`[omf]  0) Exit`);
+
+    const choice = await readLine(`[omf] Select (0-4): `);
+    switch (choice.trim()) {
+      case '1': await showStatus(config); break;
+      case '2': await tuiAutoOptimize(configDir, config); break;
+      case '3': await tuiManualChain(configDir, config); break;
+      case '4': await tuiEditOptions(configDir, config); break;
+      case '0':
+        console.log(`[omf] Exiting.`);
+        return;
+      default:
+        console.log(`[omf] Invalid choice.`);
+    }
+  }
+}
+
+// ─── Command handler for /omf ──────────────────────────────────────────────
+
+async function handleCommand({ name, args }) {
+  if (name === 'omf') {
+    const sub = (args && args[0]) || 'menu';
+    switch (sub) {
+      case 'status':
+      case 'show': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        await showStatus(config);
+        break;
+      }
+      case 'optimize':
+      case 'auto': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        await tuiAutoOptimize(configDir, config);
+        break;
+      }
+      case 'chain':
+      case 'manual': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        await tuiManualChain(configDir, config);
+        break;
+      }
+      case 'options': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        await tuiEditOptions(configDir, config);
+        break;
+      }
+      default: {
+        const configDir = getOpenCodeConfigDir();
+        await runTUI(configDir);
+        break;
+      }
+    }
+    return { handled: true };
+  }
+  return { handled: false };
+}
+
+export { OMO_MODEL_DB, discoverAvailableModels, runTUI, handleCommand };
 export default plugin;

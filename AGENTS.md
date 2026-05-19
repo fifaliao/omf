@@ -79,6 +79,15 @@ Enable auto-optimization by setting `auto_optimize: true` in `omf.json`.
 ./install.sh --configure --apply
 ```
 
+**Configure via OpenCode command:**
+```
+/omf           # Open interactive menu
+/omf status    # Show current config
+/omf optimize  # Auto-optimize fallback chain
+/omf chain     # Manually set fallback chain
+/omf options   # Edit max_retries, cooldown, etc.
+```
+
 **Change retryable HTTP status codes:** Edit `config.options.retry_on_errors` in `~/.config/opencode/omf.json`
 
 **Override config directory:** Pass `{ configDir: '/custom/path' }` as second arg to the plugin function
