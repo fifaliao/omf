@@ -40,7 +40,7 @@ omf/
 export default async (input, options?: { configDir?: string }) => PluginHooks
 ```
 
-**Config:** `~/.config/opencode/omf.json` (created on first load). Pass `configDir` option to override.
+**Config:** `~/.config/opencode/omf.json` (created on first load). Pass `configDir` option to override. Path adapts per platform: `%APPDATA%\opencode\` (Windows), `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode` (Linux/macOS).
 
 **Agent detection:** Session ID is matched against known agent names via regex. Manual sessions have no agent name in the session ID.
 

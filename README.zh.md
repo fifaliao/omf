@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash
 curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash -s -- --apply
 ```
 
-脚本会自动检测在线模式，将仓库克隆到 `~/.config/opencode/plugins/omf`，注册插件，并创建默认配置。
+脚本会自动检测在线模式，将仓库克隆到平台对应的插件目录（Linux/macOS 上为 `~/.config/opencode/plugins/omf`，Windows 上为 `%APPDATA%\opencode\plugins\omf`），注册插件，并创建默认配置。
 
 ### 本地安装（开发）
 
@@ -112,7 +112,7 @@ chmod +x install.sh
 
 ### 手动配置
 
-编辑 `~/.config/opencode/omf.json` 进行自定义：
+编辑 `omf.json` 配置文件（路径根据平台自动适配：Windows 上为 `%APPDATA%\opencode\`，Linux/macOS 上为 `~/.config/opencode/`）进行自定义：
 
 ```json
 {

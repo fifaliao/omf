@@ -13,7 +13,8 @@
  *     or "plugin": ["omf@git+https://github.com/<user>/omf.git"]
  *
  * Config:
- *   Create ~/.config/opencode/omf.json (see defaultConfig below for structure)
+ *   Create omf.json in the OpenCode config dir (platform-adaptive:
+ *     %APPDATA%/opencode/ on Windows, ~/.config/opencode/ on Linux/macOS)
  */
 
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';

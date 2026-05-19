@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash
 curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash -s -- --apply
 ```
 
-The script auto-detects online mode, clones the repo to `~/.config/opencode/plugins/omf`, registers the plugin, and creates the default config.
+The script auto-detects online mode, clones the repo to the platform-appropriate plugin directory (e.g., `~/.config/opencode/plugins/omf` on Linux/macOS or `%APPDATA%\opencode\plugins\omf` on Windows), registers the plugin, and creates the default config.
 
 ### Local install (development)
 
@@ -116,7 +116,7 @@ When enabled, omf ranks discovered models by capability tier (premium > balanced
 
 ### Manual Configuration
 
-Edit `~/.config/opencode/omf.json` to customize:
+Edit the `omf.json` config file (location adapts per platform: `%APPDATA%\opencode\` on Windows, `~/.config/opencode/` on Linux/macOS) to customize:
 
 ```json
 {
