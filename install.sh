@@ -56,9 +56,9 @@ fi
 # Windows: %APPDATA%\opencode\
 # Linux/macOS: $XDG_CONFIG_HOME/opencode or ~/.config/opencode
 detect_config_dir() {
-  if [ -n "$APPDATA" ]; then
+  if [ -n "${APPDATA:-}" ]; then
     echo "${APPDATA}/opencode"
-  elif [ -n "$XDG_CONFIG_HOME" ]; then
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
     echo "${XDG_CONFIG_HOME}/opencode"
   else
     echo "${HOME}/.config/opencode"
