@@ -17,23 +17,30 @@
 
 ```
 手动会话
-  ┌──────────┐    429/5xx     ┌──────────────┐
-  │ 模型 A   │ ─────────────→ │ omf 检测到   │
-  │ (失败)   │                │ 错误         │
-  └──────────┘                └──────┬───────┘
-                                     │
-                            ┌────────▼────────┐
-                            │ 中止失败的请求   │
-                            └────────┬────────┘
-                                     │
-                            ┌────────▼────────┐
-                            │ 使用下一个模型   │
-                            │ 重新发起提示     │
-                            └────────┬────────┘
-                                     │
-                            ┌────────▼────────┐
-                            │ 成功 → 对话继续  │
-                            └─────────────────┘
+  ┌──────────┐    429/5xx      ┌──────────────┐
+  │ 模型 A   │ ──────────────→ │ omf 检测到   │
+  │ (失败)   │                 │ 错误         │
+  └──────────┘                 └──────┬───────┘
+                                      │
+                            ┌─────────▼─────────┐
+                            │ 1. 健康预查        │
+                            │    (evolve 数据)    │
+                            │ 2. 熔断检查        │
+                            │    (provider 级别)  │
+                            └─────────┬─────────┘
+                                      │
+                            ┌─────────▼─────────┐
+                            │ 中止失败的请求      │
+                            └─────────┬─────────┘
+                                      │
+                            ┌─────────▼─────────┐
+                            │ 用最健康的 fallback│
+                            │ 模型重新发起提示    │
+                            └─────────┬─────────┘
+                                      │
+                            ┌─────────▼─────────┐
+                            │ 成功 → 对话继续    │
+                            └───────────────────┘
 ```
 
 ## 安装
@@ -116,7 +123,8 @@ TUI 支持：
 - **显示状态** — 查看当前 fallback 链、按 agent 覆盖和选项
 - **自动优化** — 从配置中发现模型并构建优化链
 - **手动配置链** — 逐个输入模型并验证格式
-- **编辑选项** — 修改 max_retries、cooldown、auto_optimize、notify
+- **编辑选项** — 修改 max_retries、cooldown、auto_optimize、notify、检测设置
+- **初始化（Init）** — 发现所有 agent 和模型，配置每个 agent 的专属 fallback 链
 
 ### omf Skill（在聊天中配置）
 
@@ -125,9 +133,36 @@ TUI 支持：
 ```
 /omf status      # 显示当前配置
 /omf optimize    # 自动发现并排序模型
+/omf init        # 发现所有 agent 和模型，配置每个 agent 的专属 fallback 链
 /omf add axon/deepseek  # 添加模型到链
 /omf remove 3    # 删除第 3 个模型
 /omf retries 5   # 设置 max_retries
+/omf evolve on   # 启用自进化 fallback 链
+/omf evolve status  # 查看每个模型的性能统计
+```
+
+### 自进化
+
+默认启用。追踪模型调用结果（成功/失败/延迟），自动调整 fallback 链顺序：
+
+- **晋升**成功率达 70% 以上的模型到链顶
+- **降级**失败率达 30% 以上的模型到链底
+- **发现**配置中新增的模型并自动追加
+- 数据存储在配置目录的 `evolve.jsonl` 中
+
+在 `omf.json` 中配置：
+
+```json
+{
+  "evolve": {
+    "enabled": true,
+    "min_observations": 5,
+    "promote_threshold": 0.7,
+    "demote_threshold": 0.3,
+    "max_chain_size": 6,
+    "new_model_behavior": "append"
+  }
+}
 ```
 
 ### 自动优化
@@ -169,13 +204,19 @@ TUI 支持：
 ```
 
 | 选项 | 描述 | 默认值 |
-|---|---|---|
+|---|---|---|---|
 | `fallback_models.default` | 手动会话的回退链 | 4 个模型 |
 | `fallback_models.agents` | 按代理覆盖（写入 oh-my-openagent.json） | `{}` |
 | `max_retries` | 每个会话的最大回退尝试次数 | 3 |
 | `cooldown_seconds` | 重试失败模型前的冷却秒数 | 30 |
 | `retry_on_errors` | 触发回退的 HTTP 状态码 | `[429, 500, 502, 503, 504]` |
 | `notify_on_fallback` | 回退触发时显示 toast 通知 | `true` |
+| `detect.empty` | 检测空响应并触发回退 | `true` |
+| `detect.refusal` | 检测 AI 拒绝模式（"I'm sorry..."）并触发回退 | `true` |
+| `detect.usage_limit` | 检测用量/额度超限（额度失败、余额不足等）并触发回退 | `true` |
+| `detect.custom_patterns` | 用户自定义失败检测正则表达式数组 | `[]` |
+| `health_check` | 回退前跳过近期高失败率的模型（基于 evolve 数据） | `true` |
+| `provider_cooldown_seconds` | 熔断：同一 provider 失败后跳过其所有模型的秒数 | `60` |
 
 ### 按代理设置回退
 
@@ -215,9 +256,51 @@ export default async function plugin(
 ### 处理的事件
 
 | 事件 | 行为 |
-|---|---|
-| `message.updated` | 检测助手消息中带有可重试状态码的错误 → 触发手动回退 |
+|---|---|---|
+| `message.updated` | 1. 检测可重试错误（状态码、provider 错误）→ 触发回退 |
+|  | 2. 检测异常响应（空响应、拒绝模式、额度超限、自定义模式）→ 触发回退 |
 | `session.error` | 会话级错误检测（被动——委托给 `message.updated`） |
+
+### 检测流水线
+
+```
+message.updated
+    │
+    ├── 错误检测: 可重试 HTTP 状态码? (429, 5xx) ──→ 回退
+    │
+    ├── 内容检测: 空响应? ──────────────────────────→ 回退
+    │
+    ├── 内容检测: 拒绝模式? ("I'm sorry...") ────────→ 回退
+    │
+    ├── 内容检测: 额度超限? (quota, 额度, 余额不足) ──→ 回退
+    │
+    └── 内容检测: 自定义模式? (用户定义的正则) ──────→ 回退
+
+回退模型选择:
+    │
+    ├── 1. 单模型冷却: 跳过近期失败的模型
+    │
+    ├── 2. Provider 熔断: 跳过同一 provider 的所有模型
+    │
+    └── 3. 健康预检: 跳过近期高失败率的模型 (evolve.jsonl)
+```
+
+### 导出函数
+
+| 函数 | 描述 |
+|---|---|
+| `runTUI(configDir?)` | 启动交互式 TUI 配置 |
+| `handleCommand({name, args})` | 处理 `/omf` 命令 |
+| `discoverAvailableModels(configDir)` | 从配置文件中发现所有模型 |
+| `discoverAgentEntries(configDir)` | 从 oh-my-openagent.json 发现所有 agent 和 category |
+| `discoverProviderModels(configDir)` | 从 opencode.json 发现 provider 定义的模型 |
+| `tuiInit(configDir, config)` | 交互式初始化：发现并配置所有 agent 和模型 |
+| `OMO_MODEL_DB.classify(modelStr)` | 将模型分类到能力层级 |
+| `OMO_MODEL_DB.rank(models)` | 按能力层级对模型排序 |
+| `OMO_MODEL_DB.optimize(models, max)` | 构建优化的 fallback 链 |
+| `logModelOutcome(configDir, model, success, latency, errorCode)` | 记录模型调用结果到 evolve.jsonl |
+| `analyzeModelPerformance(configDir, minObservations)` | 分析 evolve.jsonl 获取性能统计 |
+| `evolveFallbackChain(configDir, config)` | 运行自进化调整 fallback 链 |
 
 ## 开发
 
