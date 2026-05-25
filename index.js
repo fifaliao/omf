@@ -17,7 +17,7 @@
  *     %APPDATA%/opencode/ on Windows, ~/.config/opencode/ on Linux/macOS)
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createInterface } from 'readline';
@@ -56,6 +56,23 @@ const defaultConfig = {
     retry_on_errors: [429, 500, 502, 503, 504],
     notify_on_fallback: true,
     auto_optimize: false,
+    detect: {
+      empty: true,
+      refusal: true,
+      usage_limit: true,
+      truncated: false,
+      custom_patterns: [],
+    },
+    health_check: true,
+    provider_cooldown_seconds: 60,
+  },
+  evolve: {
+    enabled: true,
+    min_observations: 5,
+    promote_threshold: 0.7,
+    demote_threshold: 0.3,
+    max_chain_size: 6,
+    new_model_behavior: 'append',
   },
 };
 
@@ -66,25 +83,70 @@ const OMO_MODEL_DB = {
     {
       name: 'premium',
       label: 'Best Reasoning/Coding',
-      patterns: [/^opencode\/big-pickle$/, /^axon\/gpt-5/, /axon\/claude-sonnet-4/, /axon\/claude-opus/],
+      patterns: [
+        /^opencode\/big-pickle$/,
+        /^axon\/gpt-5/,
+        /axon\/claude-sonnet-4/,
+        /axon\/claude-opus/,
+        /nvidia\/z-ai\/glm-5\.1/,
+      ],
       score: 100,
     },
     {
       name: 'balanced',
       label: 'Balanced Performance',
-      patterns: [/^axon\/claude-sonnet(?!-4)/, /^axon\/gpt-4[^.]/, /gpt-4o/, /gemini-pro/, /deepseek-v3/, /deepseek-r1/],
+      patterns: [
+        /^axon\/claude-sonnet(?!-4)/,
+        /^axon\/gpt-4[^.]/,
+        /gpt-4o/,
+        /gemini-pro/,
+        /deepseek-v3/,
+        /deepseek-r1/,
+        /axon\/glm-5\b/,
+        /axon\/gemini\b/,
+        /axon\/deepseek\b/,
+        /nvidia\/z-ai\//,
+        /nvidia\/qwen\/qwen3-[0-9]+b/,
+        /nvidia\/nvidia\/llama-3\.[13]-nemotron-ultra/,
+      ],
       score: 80,
     },
     {
       name: 'fast',
       label: 'Fast & Cheap',
-      patterns: [/claude-haiku/, /gpt-4-mini/, /gpt-4\.1-nano/, /gemini-flash/, /deepseek-chat/, /deepseek-coder/],
+      patterns: [
+        /claude-haiku/,
+        /gpt-4-mini/,
+        /gpt-4\.1-nano/,
+        /gemini-flash/,
+        /deepseek-chat/,
+        /deepseek-coder/,
+        /axon\/glm-4\./,
+        /axon\/flash\b/,
+        /axon\/kimi\b/,
+        /axon\/qwen\b/,
+        /axon\/MiniMax/,
+        /grok-.*fast/,
+        /axon\/coder\b/,
+        /nvidia\/minimaxai\//,
+        /nvidia\/moonshotai\//,
+        /nvidia\/qwen\/qwen3-coder/,
+        /nvidia\/qwen\/qwen3\.5/,
+      ],
       score: 60,
     },
     {
       name: 'cheap',
       label: 'Fallback',
-      patterns: [/gpt-3\.5/, /mixtral/, /llama/, /command/, /dbrx/],
+      patterns: [
+        /gpt-3\.5/,
+        /mixtral/,
+        /llama/,
+        /command/,
+        /dbrx/,
+        /axon\/glm-4\.7/,
+        /axon\/grok-4\b/,
+      ],
       score: 40,
     },
   ],
@@ -312,6 +374,183 @@ function autoOptimizeConfig(configDir, config) {
   }
 }
 
+// ─── Self-Evolution Engine ────────────────────────────────────────────────────
+// Tracks model call outcomes (success/failure/latency), analyzes performance,
+// and automatically re-orders the fallback chain. Inspired by skill-evolver's
+// trace-driven diagnosis + data-gated iteration loop.
+
+const EVOLVE_DEFAULTS = {
+  enabled: true,
+  min_observations: 5,
+  promote_threshold: 0.7,
+  demote_threshold: 0.3,
+  max_chain_size: 6,
+  new_model_behavior: 'append',
+};
+
+function getEvolveLogPath(configDir) {
+  return join(configDir, 'evolve.jsonl');
+}
+
+function logModelOutcome(configDir, modelName, success, latencyMs, errorCode) {
+  const logPath = getEvolveLogPath(configDir);
+  const entry = {
+    t: Date.now(),
+    m: modelName,
+    s: success ? 1 : 0,
+    l: latencyMs || 0,
+    e: errorCode || null,
+  };
+  try {
+    appendFileSync(logPath, JSON.stringify(entry) + '\n', 'utf-8');
+  } catch (e) {
+    console.log(`[omf] Failed to log evolve entry: ${e.message}`);
+  }
+}
+
+function analyzeModelPerformance(configDir, minObservations) {
+  const logPath = getEvolveLogPath(configDir);
+  if (!existsSync(logPath)) return [];
+
+  try {
+    const raw = readFileSync(logPath, 'utf-8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+
+    const stats = {};
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        const m = entry.m;
+        if (!stats[m]) {
+          stats[m] = { successes: 0, failures: 0, totalLatency: 0, count: 0, lastError: null };
+        }
+        if (entry.s) stats[m].successes++;
+        else { stats[m].failures++; stats[m].lastError = entry.e; }
+        stats[m].totalLatency += entry.l || 0;
+        stats[m].count++;
+      } catch { /* skip malformed lines */ }
+    }
+
+    return Object.entries(stats)
+      .filter(([_, s]) => s.count >= minObservations)
+      .map(([model, s]) => ({
+        model,
+        successRate: s.successes / s.count,
+        avgLatency: s.count > 0 ? s.totalLatency / s.count : 0,
+        totalCalls: s.count,
+        lastError: s.lastError,
+      }))
+      .sort((a, b) => {
+        if (b.successRate !== a.successRate) return b.successRate - a.successRate;
+        return a.avgLatency - b.avgLatency;
+      });
+  } catch (e) {
+    console.log(`[omf] Evolution analysis failed: ${e.message}`);
+    return [];
+  }
+}
+
+function discoverNewModels(knownModels, configDir) {
+  try {
+    const allModels = discoverAvailableModels(configDir);
+    return allModels.filter(m => !knownModels.includes(m));
+  } catch {
+    return [];
+  }
+}
+
+function discoverAgentEntries(configDir) {
+  const entries = {};
+  const agentConfigPath = join(configDir, 'oh-my-openagent.json');
+  if (!existsSync(agentConfigPath)) return entries;
+
+  try {
+    const raw = readFileSync(agentConfigPath, 'utf-8');
+    const agentConfig = JSON.parse(raw);
+
+    if (agentConfig.agents) {
+      for (const [name, entry] of Object.entries(agentConfig.agents)) {
+        entries[name] = {
+          model: entry.model || null,
+          fallback_models: entry.fallback_models || [],
+          type: 'agent',
+        };
+      }
+    }
+
+    if (agentConfig.categories) {
+      for (const [name, entry] of Object.entries(agentConfig.categories)) {
+        entries[`[category] ${name}`] = {
+          model: entry.model || null,
+          fallback_models: entry.fallback_models || [],
+          type: 'category',
+          rawName: name,
+        };
+      }
+    }
+  } catch (e) {
+    console.log(`[omf] Failed to read agent entries: ${e.message}`);
+  }
+
+  return entries;
+}
+
+function evolveFallbackChain(configDir, config) {
+  const evolveOpts = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}) };
+  if (!evolveOpts.enabled) return false;
+
+  const currentChain = config.fallback_models?.default || [];
+  if (currentChain.length === 0) return false;
+
+  const performance = analyzeModelPerformance(configDir, evolveOpts.min_observations);
+
+  const promoteSet = new Set();
+  const demoteSet = new Set();
+
+  for (const p of performance) {
+    if (p.successRate >= evolveOpts.promote_threshold) promoteSet.add(p.model);
+    else if (p.successRate <= evolveOpts.demote_threshold) demoteSet.add(p.model);
+  }
+
+  const perfByModel = {};
+  for (const p of performance) perfByModel[p.model] = p;
+
+  const promoted = currentChain.filter(m => promoteSet.has(m));
+  const demoted = currentChain.filter(m => demoteSet.has(m));
+  const unchanged = currentChain.filter(m => !promoteSet.has(m) && !demoteSet.has(m));
+
+  promoted.sort((a, b) => (perfByModel[b]?.successRate || 0) - (perfByModel[a]?.successRate || 0));
+
+  let newModels = [];
+  if (evolveOpts.new_model_behavior === 'append') {
+    newModels = discoverNewModels(currentChain, configDir);
+    if (newModels.length > 0) {
+      console.log(`[omf] Discovered new model(s): ${newModels.join(', ')}`);
+    }
+  }
+
+  let finalChain = [...promoted, ...unchanged, ...demoted, ...newModels];
+  if (finalChain.length > evolveOpts.max_chain_size) {
+    finalChain = finalChain.slice(0, evolveOpts.max_chain_size);
+  }
+
+  if (finalChain.join(',') !== currentChain.join(',')) {
+    config.fallback_models.default = finalChain;
+    console.log(`[omf] Evolved fallback chain: [${finalChain.join(', ')}]`);
+
+    const configPath = join(configDir, 'omf.json');
+    try {
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      console.log(`[omf] Saved evolved config to omf.json`);
+    } catch (e) {
+      console.error(`[omf] Failed to save evolved config: ${e.message}`);
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // ─── Agent name detection (mirrors oh-my-opencode's logic) ────────────────────
 
 const AGENT_NAMES = [
@@ -354,6 +593,86 @@ function isRetryableError(error, retryOnErrors) {
   return false;
 }
 
+const REFUSAL_PATTERNS = [
+  /^I('m| am) (sorry|afraid)[,\.\s]/i,
+  /^(Sorry|I apologize)[,\.\s]/i,
+  /^I cannot (fulfill|complete|process|answer|provide)/i,
+  /^I('m| am) not (able|designed|equipped) to/i,
+  /^As an AI (assistant|language model)/i,
+  /(rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i,
+  /(limit|quota|额度|余额).*(exceeded|reached|失败|不足|耗尽)/i,
+  /insufficient.*(quota|balance|credit|额度|余额)/i,
+];
+
+function isUsageLimitResponse(text) {
+  return /(rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i.test(text) ||
+    /(limit|quota|额度|余额).*(exceeded|reached|失败|不足|耗尽)/i.test(text) ||
+    /insufficient.*(quota|balance|credit|额度|余额)/i.test(text);
+}
+
+function isAbnormalResponse(messageInfo, detectConfig) {
+  if (!detectConfig || !messageInfo) return null;
+  const parts = messageInfo.parts || [];
+  const text = parts
+    .filter((p) => p.type === 'text')
+    .map((p) => p.text || '')
+    .join('');
+
+  if (detectConfig.empty && (!text || text.trim().length === 0)) {
+    return { reason: 'empty', detail: 'empty response' };
+  }
+
+  if (detectConfig.refusal || detectConfig.usage_limit) {
+    const trimmed = text.trim();
+    if (isUsageLimitResponse(trimmed)) {
+      return { reason: 'usage_limit', detail: 'usage limit / quota exceeded' };
+    }
+  }
+
+  if (detectConfig.refusal) {
+    for (const pattern of REFUSAL_PATTERNS) {
+      if (pattern.test(text.trim())) {
+        return { reason: 'refusal', detail: `matches refusal pattern` };
+      }
+    }
+  }
+
+  // Custom user-defined failure patterns
+  if (Array.isArray(detectConfig.custom_patterns) && detectConfig.custom_patterns.length > 0) {
+    const trimmed = text.trim();
+    for (const pat of detectConfig.custom_patterns) {
+      try {
+        const re = new RegExp(pat, 'i');
+        if (re.test(trimmed)) {
+          return { reason: 'custom', detail: `matches custom pattern: ${pat}` };
+        }
+      } catch { /* skip invalid regex */ }
+    }
+  }
+
+  return null;
+}
+
+function getRecentModelHealth(configDir, modelName, maxEntries = 3) {
+  const logPath = getEvolveLogPath(configDir);
+  if (!existsSync(logPath)) return null;
+
+  try {
+    const raw = readFileSync(logPath, 'utf-8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+    const recent = [];
+    for (let i = lines.length - 1; i >= 0 && recent.length < maxEntries; i--) {
+      const entry = JSON.parse(lines[i]);
+      if (entry.m === modelName) recent.push(entry);
+    }
+    if (recent.length === 0) return null;
+    const failures = recent.filter((e) => !e.s).length;
+    return { total: recent.length, failures, successRate: (recent.length - failures) / recent.length };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Model parsing ────────────────────────────────────────────────────────────
 
 function parseModelString(modelStr) {
@@ -375,6 +694,7 @@ const plugin = async (input, options) => {
   writeAgentFallbacks(configDir, config);
 
   autoOptimizeConfig(configDir, config);
+  evolveFallbackChain(configDir, config);
 
   const sessionStates = new Map();
 
@@ -385,6 +705,7 @@ const plugin = async (input, options) => {
         fallbackIndex: 0,
         attemptCount: 0,
         failedModels: new Map(),
+        failedProviders: new Map(),
         pending: false,
       };
       sessionStates.set(sessionID, state);
@@ -411,12 +732,36 @@ const plugin = async (input, options) => {
     const models = config.fallback_models.default;
     if (!models || models.length === 0) return;
 
+    const providerCooldown = (config.options.provider_cooldown_seconds || 60) * 1000;
+
     let nextModel = null;
     while (state.fallbackIndex < models.length) {
       const candidate = models[state.fallbackIndex];
       state.fallbackIndex++;
+
+      // Skip models on per-model cooldown
       if (isModelOnCooldown(candidate, state)) continue;
-      if (!parseModelString(candidate)) continue;
+
+      const parsed = parseModelString(candidate);
+      if (!parsed) continue;
+
+      // Provider circuit breaker
+      const providerTs = state.failedProviders.get(parsed.providerID);
+      if (providerTs && (Date.now() - providerTs) < providerCooldown) {
+        console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
+        continue;
+      }
+
+      // Health check from evolve data
+      if (config.options.health_check !== false) {
+        const health = getRecentModelHealth(configDir, candidate, 3);
+        if (health && health.failures >= 2 && health.total >= 2) {
+          console.log(`[omf] Skipping ${candidate}: recent health (${health.failures}/${health.total} failures)`);
+          state.failedModels.set(candidate, Date.now());
+          continue;
+        }
+      }
+
       nextModel = candidate;
       break;
     }
@@ -429,6 +774,7 @@ const plugin = async (input, options) => {
 
     state.pending = true;
     state.attemptCount++;
+    const fallbackStartTime = Date.now();
 
     try {
       const messagesResp = await ctx.client.session.messages({
@@ -467,6 +813,7 @@ const plugin = async (input, options) => {
         query: { directory: ctx.directory },
       });
 
+      logModelOutcome(configDir, nextModel, true, Date.now() - fallbackStartTime);
       console.log(`[omf] ${sessionID}: fallback → ${nextModel}`);
 
       if (config.options.notify_on_fallback) {
@@ -484,8 +831,11 @@ const plugin = async (input, options) => {
         } catch { /* toast is best-effort */ }
       }
     } catch (e) {
+      logModelOutcome(configDir, nextModel, false, Date.now() - fallbackStartTime, extractStatusCode(e));
       console.log(`[omf] ${sessionID}: fallback attempt failed:`, e.message);
       state.failedModels.set(nextModel, Date.now());
+      const failParsed = parseModelString(nextModel);
+      if (failParsed) state.failedProviders.set(failParsed.providerID, Date.now());
       state.pending = false;
       return tryManualFallback(ctx, sessionID);
     }
@@ -504,11 +854,24 @@ const plugin = async (input, options) => {
         const sessionID = info.sessionID;
         if (!sessionID || !isManualSession(sessionID)) return;
 
+        // 1. Explicit error detection (status codes, provider errors)
         const error = info.error;
-        if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
+        if (error && isRetryableError(error, config.options.retry_on_errors)) {
+          console.log(`[omf] ${sessionID}: retryable error detected (${error.name})`);
+          await tryManualFallback(input, sessionID);
+          return;
+        }
 
-        console.log(`[omf] ${sessionID}: retryable error detected (${error.name})`);
-        await tryManualFallback(input, sessionID);
+        // 2. Abnormal response detection (empty, refusal, usage limit)
+        if (!error) {
+          const detectConfig = config.options.detect;
+          const abnormal = isAbnormalResponse(info, detectConfig);
+          if (abnormal) {
+            console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
+            await tryManualFallback(input, sessionID);
+            return;
+          }
+        }
       }
 
       if (event.type === 'session.error') {
@@ -552,9 +915,23 @@ async function showStatus(config) {
     }
   }
 
+  const detect = config.options?.detect || {};
+  const detectEnabled = Object.entries(detect)
+    .filter(([k, v]) => k !== 'truncated' && v)
+    .map(([k]) => k)
+    .join(', ');
+  const healthCheck = config.options?.health_check !== false;
+  const providerCD = config.options?.provider_cooldown_seconds || 60;
   console.log(`[omf] Options: max_retries=${config.options?.max_retries}, ` +
     `cooldown=${config.options?.cooldown_seconds}s, ` +
-    `auto_optimize=${config.options?.auto_optimize}`);
+    `auto_optimize=${config.options?.auto_optimize}` +
+    ` | detect=[${detectEnabled}]` +
+    ` | health_check=${healthCheck}` +
+    ` | provider_cd=${providerCD}s`);
+
+  const evolve = config.evolve || {};
+  console.log(`[omf] Evolve: ${evolve.enabled ? 'enabled' : 'disabled'}` +
+    (evolve.enabled ? ` (min_obs=${evolve.min_observations}, promote≥${evolve.promote_threshold}, demote≤${evolve.demote_threshold}, max_chain=${evolve.max_chain_size})` : ''));
 }
 
 async function tuiAutoOptimize(configDir, config) {
@@ -632,10 +1009,19 @@ async function tuiEditOptions(configDir, config) {
   console.log(`[omf]   1) max_retries: ${config.options?.max_retries}`);
   console.log(`[omf]   2) cooldown_seconds: ${config.options?.cooldown_seconds}`);
   console.log(`[omf]   3) auto_optimize: ${config.options?.auto_optimize}`);
+  const detect = config.options?.detect || {};
+  const hc = config.options?.health_check !== false;
+  const pcd = config.options?.provider_cooldown_seconds || 60;
+  const detFlags = `empty=${detect.empty}|refuse=${detect.refusal}|limit=${detect.usage_limit}`;
   console.log(`[omf]   4) notify_on_fallback: ${config.options?.notify_on_fallback}`);
+  console.log(`[omf]   5) detect: ${detFlags}`);
+  console.log(`[omf]   6) health_check: ${hc}`);
+  console.log(`[omf]   7) provider_cooldown: ${pcd}s`);
+  const evolve = config.evolve || {};
+  console.log(`[omf]   8) evolve: ${evolve.enabled ? 'enabled' : 'disabled'}`);
   console.log(`[omf]   0) Back\n`);
 
-  const choice = await readLine(`[omf] Edit which option? (0-4): `);
+  const choice = await readLine(`[omf] Edit which option? (0-8): `);
   switch (choice.trim()) {
     case '1': {
       const val = await readLine(`[omf] max_retries (current: ${config.options?.max_retries}): `);
@@ -661,6 +1047,44 @@ async function tuiEditOptions(configDir, config) {
       if (val === 'false') config.options.notify_on_fallback = false;
       break;
     }
+    case '5': {
+      const d = config.options.detect || {};
+      const toggle = await readLine(`[omf] toggle detect (empty/refusal/usage_limit/custom), current: empty=${d.empty}, refusal=${d.refusal}, usage_limit=${d.usage_limit}, custom_patterns=${(d.custom_patterns||[]).length} patterns: `);
+      const t = toggle.trim().toLowerCase();
+      if (t === 'empty') config.options.detect = { ...d, empty: !d.empty };
+      else if (t === 'refusal') config.options.detect = { ...d, refusal: !d.refusal };
+      else if (t === 'usage_limit' || t === 'limit') config.options.detect = { ...d, usage_limit: !d.usage_limit };
+      else if (t === 'custom') {
+        const pat = await readLine(`[omf] add custom pattern (regex string, e.g. "预扣费|余额不足"): `);
+        if (pat.trim()) {
+          const arr = d.custom_patterns || [];
+          arr.push(pat.trim());
+          config.options.detect = { ...d, custom_patterns: arr };
+        }
+      }
+      break;
+    }
+    case '6': {
+      config.options.health_check = !config.options.health_check;
+      if (config.options.health_check === undefined) config.options.health_check = true;
+      console.log(`[omf] health_check set to: ${config.options.health_check}`);
+      break;
+    }
+    case '7': {
+      const val = await readLine(`[omf] provider_cooldown_seconds (current: ${pcd}): `);
+      const n = parseInt(val);
+      if (n > 0) config.options.provider_cooldown_seconds = n;
+      break;
+    }
+    case '8': {
+      const val = await readLine(`[omf] evolve (true/false, current: ${config.evolve?.enabled}): `);
+      if (val === 'true' || val === 'on') {
+        config.evolve = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}), enabled: true };
+      } else if (val === 'false' || val === 'off') {
+        config.evolve = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}), enabled: false };
+      }
+      break;
+    }
     case '0': return false;
     default: console.log(`[omf] Invalid choice.`); return false;
   }
@@ -669,6 +1093,181 @@ async function tuiEditOptions(configDir, config) {
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
   console.log(`[omf] Options updated.`);
   return true;
+}
+
+// ─── Init: Discover & Configure ─────────────────────────────────────────────
+
+async function tuiInit(configDir, config) {
+  console.log(`\n[omf] ═══ omf Init — Discover & Configure ═══`);
+
+  // 1. Discover provider models from opencode.json
+  const providerModels = discoverProviderModels(configDir);
+  console.log(`\n[omf] Provider models (from opencode.json providers):`);
+  if (providerModels.length === 0) {
+    console.log(`[omf]   (none found)`);
+  } else {
+    const ranked = OMO_MODEL_DB.rank(providerModels);
+    ranked.forEach((m, i) => {
+      const cls = OMO_MODEL_DB.classify(m);
+      const label = cls ? ` (${cls.name})` : '';
+      console.log(`[omf]   ${i + 1}) ${m}${label}`);
+    });
+  }
+
+  // 2. All available models across all configs
+  const allModels = discoverAvailableModels(configDir);
+  console.log(`\n[omf] All available models (${allModels.length} total):`);
+  const allRanked = OMO_MODEL_DB.rank(allModels);
+  allRanked.forEach((m, i) => {
+    const cls = OMO_MODEL_DB.classify(m);
+    const label = cls ? ` (${cls.name})` : ' (unclassified)';
+    console.log(`[omf]   ${i + 1}) ${m}${label}`);
+  });
+
+  // 3. Discover agents & categories
+  const agentEntries = discoverAgentEntries(configDir);
+  const agentKeys = Object.keys(agentEntries);
+  console.log(`\n[omf] Agents / Categories (${agentKeys.length} total):`);
+  if (agentKeys.length === 0) {
+    console.log(`[omf]   (none found — oh-my-openagent.json not configured)`);
+  } else {
+    agentKeys.sort().forEach((name) => {
+      const entry = agentEntries[name];
+      const modelLabel = entry.model || '(no primary model)';
+      console.log(`[omf]   ${name}`);
+      console.log(`[omf]     primary: ${modelLabel}`);
+      if (entry.fallback_models.length > 0) {
+        console.log(`[omf]     current fallbacks (${entry.fallback_models.length}): [${entry.fallback_models.slice(0, 3).join(', ')}${entry.fallback_models.length > 3 ? '...' : ''}]`);
+      }
+    });
+  }
+
+  // 4. Propose optimized default chain
+  const optimizedDefault = OMO_MODEL_DB.optimize(allModels, 6);
+  console.log(`\n[omf] Proposed default fallback chain (${optimizedDefault.length} models):`);
+  optimizedDefault.forEach((m, i) => {
+    const cls = OMO_MODEL_DB.classify(m);
+    const label = cls ? ` (${cls.name})` : '';
+    console.log(`[omf]   ${i + 1}) ${m}${label}`);
+  });
+
+  // 5. Propose per-agent/category chains
+  const proposedAgentChains = {};
+  for (const [name, entry] of Object.entries(agentEntries)) {
+    const pool = entry.model
+      ? [entry.model, ...allModels.filter(m => m !== entry.model)]
+      : allModels;
+    const chain = OMO_MODEL_DB.optimize(pool, 6);
+    proposedAgentChains[name] = chain;
+  }
+
+  // Show a few key agents
+  const agentOnlyKeys = agentKeys.filter(k => agentEntries[k].type === 'agent').sort();
+  if (agentOnlyKeys.length > 0) {
+    console.log(`\n[omf] Proposed per-agent fallback chains (showing first 3):`);
+    agentOnlyKeys.slice(0, 3).forEach((name) => {
+      console.log(`[omf]   ${name}: [${proposedAgentChains[name].join(', ')}]`);
+    });
+    if (agentOnlyKeys.length > 3) {
+      console.log(`[omf]   ... and ${agentOnlyKeys.length - 3} more agent(s)`);
+    }
+  }
+
+  // 6. Confirm
+  console.log(``);
+  const ok = await readLine(`[omf] Apply proposed configuration? (y/n/detail): `);
+  const answer = ok.trim().toLowerCase();
+
+  if (answer === 'y' || answer === 'yes') {
+    // Apply default chain
+    config.fallback_models.default = optimizedDefault;
+
+    // Apply per-agent chains
+    for (const [name, chain] of Object.entries(proposedAgentChains)) {
+      const entry = agentEntries[name];
+      if (entry.type === 'category') {
+        config.fallback_models.agents[entry.rawName] = chain;
+      } else {
+        config.fallback_models.agents[name] = chain;
+      }
+    }
+
+    // Save
+    const configPath = join(configDir, 'omf.json');
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    console.log(`[omf] Config saved to ${configPath}`);
+
+    // Write agent fallbacks to oh-my-openagent.json
+    writeAgentFallbacks(configDir, config);
+
+    console.log(`[omf] Init complete. Restart OpenCode for changes to take effect.`);
+    return true;
+  }
+
+  if (answer === 'detail') {
+    // Show full per-agent proposal and ask individually
+    console.log(`\n[omf] Full per-agent proposal:`);
+    let idx = 1;
+    const allNames = agentKeys.sort();
+    for (const name of allNames) {
+      console.log(`[omf]   ${idx}) ${name}`);
+      console.log(`[omf]      chain: [${proposedAgentChains[name].join(', ')}]`);
+      const current = agentEntries[name].fallback_models || [];
+      if (current.length > 0) {
+        console.log(`[omf]      current: [${current.join(', ')}]`);
+      }
+      idx++;
+    }
+    console.log(`[omf]   ${idx}) default chain`);
+    console.log(`[omf]      chain: [${optimizedDefault.join(', ')}]`);
+
+    const sel = await readLine(`\n[omf] Enter number to customize, or 'apply' to apply all: `);
+    if (sel.trim() === 'apply') {
+      config.fallback_models.default = optimizedDefault;
+      for (const [name, chain] of Object.entries(proposedAgentChains)) {
+        const entry = agentEntries[name];
+        if (entry.type === 'category') {
+          config.fallback_models.agents[entry.rawName] = chain;
+        } else {
+          config.fallback_models.agents[name] = chain;
+        }
+      }
+      const configPath = join(configDir, 'omf.json');
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      writeAgentFallbacks(configDir, config);
+      console.log(`[omf] Init complete.`);
+      return true;
+    }
+    console.log(`[omf] Init cancelled.`);
+    return false;
+  }
+
+  console.log(`[omf] Init cancelled.`);
+  return false;
+}
+
+function discoverProviderModels(configDir) {
+  const models = new Set();
+  const opencodeConfigPath = join(configDir, 'opencode.json');
+  if (!existsSync(opencodeConfigPath)) return [];
+
+  try {
+    const raw = readFileSync(opencodeConfigPath, 'utf-8');
+    const config = JSON.parse(raw);
+    const providers = config.provider || {};
+
+    for (const [providerName, providerConfig] of Object.entries(providers)) {
+      if (providerConfig.models && typeof providerConfig.models === 'object') {
+        for (const modelKey of Object.keys(providerConfig.models)) {
+          models.add(`${providerName}/${modelKey}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[omf] Failed to read provider models: ${e.message}`);
+  }
+
+  return [...models];
 }
 
 async function runTUI(configDir) {
@@ -680,14 +1279,16 @@ async function runTUI(configDir) {
     console.log(`[omf]  2) Auto-optimize fallback chain`);
     console.log(`[omf]  3) Manually set fallback chain`);
     console.log(`[omf]  4) Edit options`);
+    console.log(`[omf]  5) Init — discover & configure all agents and models`);
     console.log(`[omf]  0) Exit`);
 
-    const choice = await readLine(`[omf] Select (0-4): `);
+    const choice = await readLine(`[omf] Select (0-5): `);
     switch (choice.trim()) {
       case '1': await showStatus(config); break;
       case '2': await tuiAutoOptimize(configDir, config); break;
       case '3': await tuiManualChain(configDir, config); break;
       case '4': await tuiEditOptions(configDir, config); break;
+      case '5': await tuiInit(configDir, config); break;
       case '0':
         console.log(`[omf] Exiting.`);
         return;
@@ -730,6 +1331,66 @@ async function handleCommand({ name, args }) {
         await tuiEditOptions(configDir, config);
         break;
       }
+      case 'init':
+      case 'setup': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        await tuiInit(configDir, config);
+        break;
+      }
+      case 'evolve': {
+        const configDir = getOpenCodeConfigDir();
+        const config = loadConfig(configDir);
+        const evolveSub = args[1];
+        if (evolveSub === 'on' || evolveSub === 'enable') {
+          config.evolve = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}), enabled: true };
+          const configPath = join(configDir, 'omf.json');
+          writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+          console.log(`[omf] Self-evolution enabled.`);
+          console.log(`[omf] Next plugin load will analyze performance data and adjust the fallback chain.`);
+        } else if (evolveSub === 'off' || evolveSub === 'disable') {
+          config.evolve = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}), enabled: false };
+          const configPath = join(configDir, 'omf.json');
+          writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+          console.log(`[omf] Self-evolution disabled.`);
+        } else if (evolveSub === 'status') {
+          const evolveOpts = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}) };
+          console.log(`\n[omf] Evolve: ${evolveOpts.enabled ? 'enabled' : 'disabled'}`);
+          if (evolveOpts.enabled) {
+            console.log(`[omf]   min_observations: ${evolveOpts.min_observations}`);
+            console.log(`[omf]   promote_threshold: ${evolveOpts.promote_threshold}`);
+            console.log(`[omf]   demote_threshold: ${evolveOpts.demote_threshold}`);
+            console.log(`[omf]   max_chain_size: ${evolveOpts.max_chain_size}`);
+            console.log(`[omf]   new_model_behavior: ${evolveOpts.new_model_behavior}`);
+            const performance = analyzeModelPerformance(configDir, 0);
+            if (performance.length > 0) {
+              console.log(`[omf] Model Performance:`);
+              for (const p of performance) {
+                const rate = (p.successRate * 100).toFixed(0);
+                const lat = (p.avgLatency / 1000).toFixed(1);
+                console.log(`[omf]   ${p.model}  success: ${rate}% (${p.totalCalls} calls, avg ${lat}s)`);
+              }
+            } else {
+              console.log(`[omf] No performance data yet. Use fallback models to collect data.`);
+            }
+          }
+        } else if (evolveSub === 'reset') {
+          const logPath = getEvolveLogPath(configDir);
+          try {
+            writeFileSync(logPath, '', 'utf-8');
+            console.log(`[omf] Evolution data cleared.`);
+          } catch (e) {
+            console.error(`[omf] Failed to clear evolve data: ${e.message}`);
+          }
+        } else {
+          console.log(`[omf] Evolve subcommands:`);
+          console.log(`[omf]   /omf evolve on       Enable self-evolution`);
+          console.log(`[omf]   /omf evolve off      Disable self-evolution`);
+          console.log(`[omf]   /omf evolve status   Show evolution stats & model performance`);
+          console.log(`[omf]   /omf evolve reset    Clear evolution data`);
+        }
+        break;
+      }
       default: {
         const configDir = getOpenCodeConfigDir();
         await runTUI(configDir);
@@ -741,5 +1402,19 @@ async function handleCommand({ name, args }) {
   return { handled: false };
 }
 
-export { OMO_MODEL_DB, discoverAvailableModels, runTUI, handleCommand };
+export {
+  OMO_MODEL_DB,
+  discoverAvailableModels,
+  discoverAgentEntries,
+  discoverProviderModels,
+  runTUI,
+  tuiInit,
+  handleCommand,
+  EVOLVE_DEFAULTS,
+  getEvolveLogPath,
+  logModelOutcome,
+  analyzeModelPerformance,
+  discoverNewModels,
+  evolveFallbackChain,
+};
 export default plugin;
