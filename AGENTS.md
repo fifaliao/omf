@@ -28,12 +28,7 @@ omf/
 
 ## Architecture
 
-**Two fallback modes:**
-
-| Session Type | How Fallback Works |
-|---|---|
-| Manual (no agent) | `omf` handles it directly — aborts request, re-prompts with next model |
-| Agent (sisyphus, etc.) | Writes `fallback_models` to `~/.config/opencode/oh-my-openagent.json` — oh-my-opencode's native runtime handles it |
+**Single fallback mode:** `omf` handles fallback for all session types directly. `oh-my-openagent.json` only keeps each agent/category's primary `model`; fallback chains live in `~/.config/opencode/omf.json`, and `omf` performs the abort + retry itself.
 
 **Plugin API contract:** Exports a default async function matching OpenCode's `PluginInput → PluginHooks` signature:
 ```js
