@@ -364,12 +364,56 @@ async function discoverProviderApiModels(configDir) {
   try {
     const output = execSync('opencode models', { encoding: 'utf-8', timeout: 15000 });
     const lines = output.trim().split('\n').filter(Boolean);
-    const models = lines.map(line => {
+    
+    const testedModels = [];
+    for (const line of lines) {
       const id = line.trim();
-      return { id, name: id.split('/').pop() || id, cost: null, source: 'cli' };
-    });
-    console.log(`[omf] Discovered ${models.length} models via \`opencode models\` CLI`);
-    return models;
+      if (!id) continue;
+      
+      try {
+        const startTime = Date.now();
+        const testOutput = execSync(`opencode run -m ${id} 'ping' --format json`, { 
+          encoding: 'utf-8', 
+          timeout: 10000 
+        });
+        const endTime = Date.now();
+        const latency = endTime - startTime;
+        
+        const response = JSON.parse(testOutput);
+        const success = response && response.length > 0;
+        
+        testedModels.push({ 
+          id, 
+          name: id.split('/').pop() || id, 
+          cost: null, 
+          source: 'cli',
+          latency, 
+          success,
+          lastTested: Date.now()
+        });
+        
+        logModelOutcome(configDir, id, success, latency);
+        
+      } catch (error) {
+        const latency = 9999;
+        testedModels.push({ 
+          id, 
+          name: id.split('/').pop() || id, 
+          cost: null, 
+          source: 'cli',
+          latency, 
+          success: false,
+          lastTested: Date.now()
+        });
+        
+        logModelOutcome(configDir, id, false, 9999);
+        
+        console.log(`[omf] Test failed for ${id}: ${error.message}`);
+      }
+    }
+    
+    console.log(`[omf] Tested ${testedModels.length} models via \`opencode models\` CLI`);
+    return testedModels;
   } catch (e) {
     console.log(`[omf] \`opencode models\` CLI failed: ${e.message}`);
     return [];
@@ -499,7 +543,84 @@ async function autoOptimizeConfig(configDir, config) {
     config.model_tiers = newTiers;
     OMO_MODEL_DB._configTiers = newTiers;
 
-    const optimizedChain = OMO_MODEL_DB.optimize(availableModels, 6);
+    // Get performance data from evolution logs
+    const performance = analyzeModelPerformance(configDir, 1);
+    const performanceMap = new Map();
+    for (const p of performance) {
+      performanceMap.set(p.model, p);
+    }
+
+    // Create enhanced scoring based on performance and capabilities
+    const scored = availableModels.map((modelId, idx) => {
+      const tierInfo = OMO_MODEL_DB.classify(modelId) || { tier: 'balanced', score: 50 };
+      const caps = inferModelCapabilities(modelId);
+      const perfData = performanceMap.get(modelId) || { successRate: 0.5, avgLatency: 2000, totalCalls: 0 };
+      
+      let score = tierInfo.score;
+      
+      // Success rate: 0-100% -> 0-50 points (max 50 point boost)
+      score += perfData.successRate * 50;
+      
+      // Latency: lower is better. 0-500ms = 0-30 bonus, 500-2000ms = 30-0 bonus, >2000ms = -40 penalty
+      let latencyBonus = 0;
+      if (perfData.avgLatency <= 500) {
+        latencyBonus = 30;
+      } else if (perfData.avgLatency <= 2000) {
+        latencyBonus = 30 * (1 - (perfData.avgLatency - 500) / 1500);
+      } else {
+        latencyBonus = -40;
+      }
+      score += latencyBonus;
+      
+      // Capability match: compare with first model
+      if (idx === 0) {
+        // First model as reference
+        score += caps.size * 2;
+      } else {
+        const refCaps = inferModelCapabilities(availableModels[0]);
+        const intersection = [...caps].filter(c => refCaps.has(c)).length;
+        const union = new Set([...caps, ...refCaps]).size;
+        const capMatch = union > 0 ? intersection / union : 0;
+        score += capMatch * 20;
+      }
+      
+      // Ensure minimum score is 0
+      score = Math.max(0, score);
+      
+      return { 
+        modelId, 
+        score, 
+        tier: tierInfo.tier, 
+        caps, 
+        idx,
+        latency: perfData.avgLatency,
+        successRate: perfData.successRate
+      };
+    });
+
+    // Stable sort by score, then by original order
+    scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
+
+    const sorted = scored.map(s => s.modelId);
+    const links = {};
+    for (let i = 0; i < sorted.length - 1; i++) {
+      links[sorted[i]] = sorted[i + 1];
+    }
+
+    // Safety: walk 5 steps from each node, assert no self-loop
+    for (const modelId of sorted) {
+      let current = links[modelId];
+      for (let step = 0; step < 5; step++) {
+        if (!current) break;
+        if (current === modelId) {
+          console.warn(`[omf] Cycle detected at ${modelId}, falling back to performance strategy`);
+          return autoOptimizeConfig(configDir, config);
+        }
+        current = links[current];
+      }
+    }
+
+    const optimizedChain = sorted;
     const currentChain = config.fallback_models?.default || [];
 
     const currentSorted = [...currentChain].sort().join(',');
@@ -519,7 +640,21 @@ async function autoOptimizeConfig(configDir, config) {
     }
 
     config.fallback_models.default = optimizedChain;
-    console.log(`[omf] Auto-optimized fallback chain: [${optimizedChain.join(', ')}]`);
+    config.fallback_chain = {
+      links: links,
+      head: optimizedChain[0] || null,
+      strategy: config.fallback_chain?.strategy || 'performance'
+    };
+
+    console.log(`[omf] Auto-optimized fallback chain structure:`);
+    let current = config.fallback_chain.head;
+    let index = 1;
+    while (current) {
+      const next = links[current] || 'END';
+      console.log(`[omf]   ${index}. ${current} → ${next}`);
+      current = next === 'END' ? null : links[current];
+      index++;
+    }
 
     const configPath = join(configDir, 'omf.json');
     if (existsSync(configPath)) {
@@ -1163,18 +1298,55 @@ function readLine(prompt) {
 
 async function showStatus(config) {
   console.log(`\n[omf] Current fallback chain:`);
-  (config.fallback_models?.default || []).forEach((m, i) => {
-    const cls = OMO_MODEL_DB.classify(m);
-    const label = cls ? ` (${cls.name})` : '';
-    console.log(`[omf]   ${i + 1}) ${m}${label}`);
-  });
+  
+  const head = config.fallback_chain?.head;
+  const links = config.fallback_chain?.links || {};
+  
+  if (head) {
+    let current = head;
+    let index = 1;
+    while (current) {
+      const next = links[current] || 'END';
+      const cls = OMO_MODEL_DB.classify(current);
+      const label = cls ? ` (${cls.name})` : '';
+      console.log(`[omf] ${index}. ${current}${label} → ${next}`);
+      current = next === 'END' ? null : links[current];
+      index++;
+    }
+  } else {
+    (config.fallback_models?.default || []).forEach((m, i) => {
+      const cls = OMO_MODEL_DB.classify(m);
+      const label = cls ? ` (${cls.name})` : '';
+      console.log(`[omf] ${i + 1}) ${m}${label}`);
+    });
+  }
 
   const agents = config.fallback_models?.agents || {};
   if (Object.keys(agents).length > 0) {
     console.log(`[omf] Per-agent fallback overrides:`);
     for (const [agent, models] of Object.entries(agents)) {
-      console.log(`[omf]   ${agent}: ${models.join(', ')}`);
+      console.log(`[omf] ${agent}: ${models.join(', ')}`);
     }
+  }
+
+  const detect = config.options?.detect || {};
+  const detectEnabled = Object.entries(detect)
+    .filter(([k, v]) => k !== 'truncated' && v)
+    .map(([k]) => k)
+    .join(', ');
+  const healthCheck = config.options?.health_check !== false;
+  const providerCD = config.options?.provider_cooldown_seconds || 60;
+  console.log(`[omf] Options: max_retries=${config.options?.max_retries}, ` +
+    `cooldown=${config.options?.cooldown_seconds}s, ` +
+    `auto_optimize=${config.options?.auto_optimize}` +
+    ` | detect=[${detectEnabled}]` +
+    ` | health_check=${healthCheck}` +
+    ` | provider_cd=${providerCD}s`);
+
+  const evolve = config.evolve || {};
+  console.log(`[omf] Evolve: ${evolve.enabled ? 'enabled' : 'disabled'}` +
+    (evolve.enabled ? ` (min_obs=${evolve.min_observations}, promote≥${evolve.promote_threshold}, demote≤${evolve.demote_threshold}, max_chain=${evolve.max_chain_size})` : ''));
+}
   }
 
   const detect = config.options?.detect || {};
