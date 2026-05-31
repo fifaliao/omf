@@ -883,8 +883,6 @@ function isRetryableError(error, retryOnErrors) {
   if (statusCode && retryOnErrors.includes(statusCode)) return true;
   if (error.name === 'ProviderAuthError') return false;
   if (error.name === 'MessageAbortedError') return false;
-  // Text-based rate limit detection: catch "Too Many Requests", "rate limit", "retrying in"
-  // even when the error carries no numeric status code (e.g. main model calls)
   const errorText = [
     error.message,
     error.data?.message,
@@ -892,7 +890,7 @@ function isRetryableError(error, retryOnErrors) {
     typeof error.data === 'string' ? error.data : null,
     typeof error === 'string' ? error : null,
   ].filter(Boolean).join(' ').toLowerCase();
-  if (/too many requests|rate limit|retrying in|429/.test(errorText)) return true;
+  if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(errorText)) return true;
   return false;
 }
 
@@ -1262,7 +1260,7 @@ const plugin = async (input, options) => {
         if (status?.type === 'retry' && status.attempt >= 1) {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
-          if (/too many requests|rate limit|retrying in|429/.test(msg)) {
+          if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting retry (attempt ${status.attempt}) — ${status.message}`);
             const sessState = getOrCreateSessionState(sessionID);
             sessState.pending = false;
@@ -1327,26 +1325,6 @@ async function showStatus(config) {
     for (const [agent, models] of Object.entries(agents)) {
       console.log(`[omf] ${agent}: ${models.join(', ')}`);
     }
-  }
-
-  const detect = config.options?.detect || {};
-  const detectEnabled = Object.entries(detect)
-    .filter(([k, v]) => k !== 'truncated' && v)
-    .map(([k]) => k)
-    .join(', ');
-  const healthCheck = config.options?.health_check !== false;
-  const providerCD = config.options?.provider_cooldown_seconds || 60;
-  console.log(`[omf] Options: max_retries=${config.options?.max_retries}, ` +
-    `cooldown=${config.options?.cooldown_seconds}s, ` +
-    `auto_optimize=${config.options?.auto_optimize}` +
-    ` | detect=[${detectEnabled}]` +
-    ` | health_check=${healthCheck}` +
-    ` | provider_cd=${providerCD}s`);
-
-  const evolve = config.evolve || {};
-  console.log(`[omf] Evolve: ${evolve.enabled ? 'enabled' : 'disabled'}` +
-    (evolve.enabled ? ` (min_obs=${evolve.min_observations}, promote≥${evolve.promote_threshold}, demote≤${evolve.demote_threshold}, max_chain=${evolve.max_chain_size})` : ''));
-}
   }
 
   const detect = config.options?.detect || {};
