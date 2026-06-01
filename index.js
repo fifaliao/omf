@@ -50,7 +50,6 @@ const defaultConfig = {
       'axon/claude-sonnet',
       'axon/deepseek',
     ],
-    agents: {},
   },
   options: {
     max_retries: 3,
@@ -267,97 +266,10 @@ function loadConfig(configDir) {
 
 
 
-// ─── Model Discovery & Auto-Optimization ───────────────────────────────────────
+// ─── Model Discovery (CLI only) ────────────────────────────────────────────
 
 function discoverAvailableModels(configDir) {
-  const models = new Set();
-
-  const agentConfigPath = join(configDir, 'oh-my-openagent.json');
-  if (existsSync(agentConfigPath)) {
-    try {
-      const raw = readFileSync(agentConfigPath, 'utf-8');
-      const agentConfig = JSON.parse(raw);
-      const agents = agentConfig.agents || {};
-
-        for (const agent of Object.values(agents)) {
-      if (agent.model && typeof agent.model === 'string') {
-        models.add(agent.model);
-      }
-    }
-    } catch (e) {
-      console.log(`[omf] Failed to read oh-my-openagent.json: ${e.message}`);
-    }
-  }
-
-  const omfConfigPath = join(configDir, 'omf.json');
-  if (existsSync(omfConfigPath)) {
-    try {
-      const raw = readFileSync(omfConfigPath, 'utf-8');
-      const omfConfig = JSON.parse(raw);
-      const defaultChain = omfConfig.fallback_models?.default || [];
-      const agentChains = omfConfig.fallback_models?.agents || {};
-      for (const model of defaultChain) {
-        if (typeof model === 'string') models.add(model);
-      }
-      for (const chain of Object.values(agentChains)) {
-        if (Array.isArray(chain)) {
-          for (const model of chain) {
-            if (typeof model === 'string') models.add(model);
-          }
-        }
-      }
-    } catch (e) {
-      console.log(`[omf] Failed to read omf.json: ${e.message}`);
-    }
-  }
-
-  const opencodeConfigPath = join(configDir, 'opencode.json');
-  if (existsSync(opencodeConfigPath)) {
-    try {
-      const raw = readFileSync(opencodeConfigPath, 'utf-8');
-      const opencodeConfig = JSON.parse(raw);
-
-      // Discover provider-defined models (e.g. axon/glm-5, opencode/big-pickle)
-      const providers = opencodeConfig.provider || {};
-      for (const [providerName, providerConfig] of Object.entries(providers)) {
-        if (providerConfig.models && typeof providerConfig.models === 'object') {
-          for (const modelKey of Object.keys(providerConfig.models)) {
-            models.add(`${providerName}/${modelKey}`);
-          }
-        }
-      }
-
-      // Generic recursive extraction for other model references
-      function extractModels(obj) {
-        if (!obj || typeof obj !== 'object') return;
-        if (obj.model && typeof obj.model === 'string') {
-          models.add(obj.model);
-        }
-        if (Array.isArray(obj.models)) {
-          for (const m of obj.models) {
-            if (typeof m === 'string') models.add(m);
-            else if (typeof m === 'object' && m.id) models.add(m.id);
-          }
-        }
-        if (Array.isArray(obj.fallback_models)) {
-          for (const m of obj.fallback_models) {
-            if (typeof m === 'string') models.add(m);
-          }
-        }
-        for (const value of Object.values(obj)) {
-          if (value && typeof value === 'object') {
-            extractModels(value);
-          }
-        }
-      }
-
-      extractModels(opencodeConfig);
-    } catch (e) {
-      console.log(`[omf] Failed to read opencode.json: ${e.message}`);
-    }
-  }
-
-  return [...models];
+  return [];
 }
 
 async function discoverProviderApiModels(configDir) {
@@ -514,7 +426,6 @@ async function autoOptimizeConfig(configDir, config) {
   }
 
   try {
-    const fileModels = discoverAvailableModels(configDir);
     let apiModelObjs = [];
     try {
       apiModelObjs = await discoverProviderApiModels(configDir);
@@ -522,14 +433,14 @@ async function autoOptimizeConfig(configDir, config) {
       console.log(`[omf] Provider API discovery skipped: ${e.message}`);
     }
     const apiModelIds = apiModelObjs.map(m => m.id);
-    const availableModels = [...new Set([...fileModels, ...apiModelIds])];
+    const availableModels = apiModelIds;
 
     if (availableModels.length === 0) {
-      console.log(`[omf] No models found in configs to optimize`);
+      console.log(`[omf] No models found via \`opencode models\` CLI`);
       return;
     }
 
-    console.log(`[omf] Auto-optimize: ${apiModelIds.length} models via CLI, ${fileModels.length} from configs, ${availableModels.length} unique total`);
+    console.log(`[omf] Auto-optimize: ${availableModels.length} models discovered via CLI`);
 
     // Update model_tiers in config for visibility
     const newTiers = { premium: [], balanced: [], fast: [], cheap: [] };
@@ -626,7 +537,7 @@ async function autoOptimizeConfig(configDir, config) {
     const currentSorted = [...currentChain].sort().join(',');
     const optimizedSorted = [...optimizedChain].sort().join(',');
 
-    if (currentSorted === optimizedSorted && apiModelIds.length <= fileModels.length) {
+    if (currentSorted === optimizedSorted) {
       console.log(`[omf] Auto-optimize: fallback chain unchanged`);
       const configPath = join(configDir, 'omf.json');
       if (existsSync(configPath)) {
@@ -748,8 +659,11 @@ function analyzeModelPerformance(configDir, minObservations) {
 
 function discoverNewModels(knownModels, configDir) {
   try {
-    const allModels = discoverAvailableModels(configDir);
-    return allModels.filter(m => !knownModels.includes(m));
+    const output = execSync('opencode models', { encoding: 'utf-8', timeout: 15000 });
+    const lines = output.trim().split('\n').filter(Boolean);
+    return lines
+      .map(l => l.trim())
+      .filter(id => id && !knownModels.includes(id));
   } catch {
     return [];
   }
@@ -1023,6 +937,21 @@ function cleanOmoFallbacks(configDir) {
   } catch (e) {
     console.log(`[omf] Failed to clean oh-my-openagent.json: ${e.message}`);
   }
+
+  // Also clean up omf.json: remove legacy per-agent fallback config
+  const omfConfigPath = join(configDir, 'omf.json');
+  if (!existsSync(omfConfigPath)) return;
+  try {
+    const omfRaw = readFileSync(omfConfigPath, 'utf-8');
+    const omfConfig = JSON.parse(omfRaw);
+    if (omfConfig.fallback_models?.agents) {
+      delete omfConfig.fallback_models.agents;
+      writeFileSync(omfConfigPath, JSON.stringify(omfConfig, null, 2) + '\n', 'utf-8');
+      console.log(`[omf] Cleaned legacy agents config from omf.json`);
+    }
+  } catch (e) {
+    console.log(`[omf] Failed to clean omf.json: ${e.message}`);
+  }
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -1063,7 +992,7 @@ const plugin = async (input, options) => {
     return (Date.now() - ts) < config.options.cooldown_seconds * 1000;
   }
 
-  async function tryManualFallback(ctx, sessionID, agentName) {
+  async function tryManualFallback(ctx, sessionID) {
     const state = getOrCreateSessionState(sessionID);
 
     if (state.pending) return;
@@ -1075,13 +1004,6 @@ const plugin = async (input, options) => {
 
     let models = config.fallback_models.default;
     let links = config.fallback_chain?.links || null;
-    if (agentName && config.fallback_models?.agents?.[agentName]) {
-      const agentChain = config.fallback_models.agents[agentName];
-      if (Array.isArray(agentChain) && agentChain.length > 0) {
-        models = agentChain;
-        console.log(`[omf] ${sessionID}: using per-agent fallback chain for "${agentName}"`);
-      }
-    }
     if (!models || models.length === 0) return;
 
     const providerCooldown = (config.options.provider_cooldown_seconds || 60) * 1000;
@@ -1213,7 +1135,7 @@ const plugin = async (input, options) => {
       const failParsed = parseModelString(nextModel);
       if (failParsed) state.failedProviders.set(failParsed.providerID, Date.now());
       state.pending = false;
-      return tryManualFallback(ctx, sessionID, agentName);
+      return tryManualFallback(ctx, sessionID);
     }
 
     state.pending = false;
@@ -1230,13 +1152,11 @@ const plugin = async (input, options) => {
         const sessionID = info.sessionID;
         if (!sessionID) return;
 
-        const agentName = extractAgentName(sessionID);
-
         // 1. Explicit error detection (status codes, provider errors)
         const error = info.error;
         if (error && isRetryableError(error, config.options.retry_on_errors)) {
           console.log(`[omf] ${sessionID}: retryable error detected (${error.name})`);
-          await tryManualFallback(input, sessionID, agentName);
+          await tryManualFallback(input, sessionID);
           return;
         }
 
@@ -1246,7 +1166,7 @@ const plugin = async (input, options) => {
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
             console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
-            await tryManualFallback(input, sessionID, agentName);
+            await tryManualFallback(input, sessionID);
             return;
           }
         }
@@ -1264,7 +1184,7 @@ const plugin = async (input, options) => {
             console.log(`[omf] ${sessionID}: intercepting retry (attempt ${status.attempt}) — ${status.message}`);
             const sessState = getOrCreateSessionState(sessionID);
             sessState.pending = false;
-            await tryManualFallback(input, sessionID, extractAgentName(sessionID));
+            await tryManualFallback(input, sessionID);
           }
         }
       }
@@ -1319,14 +1239,6 @@ async function showStatus(config) {
     });
   }
 
-  const agents = config.fallback_models?.agents || {};
-  if (Object.keys(agents).length > 0) {
-    console.log(`[omf] Per-agent fallback overrides:`);
-    for (const [agent, models] of Object.entries(agents)) {
-      console.log(`[omf] ${agent}: ${models.join(', ')}`);
-    }
-  }
-
   const detect = config.options?.detect || {};
   const detectEnabled = Object.entries(detect)
     .filter(([k, v]) => k !== 'truncated' && v)
@@ -1354,18 +1266,16 @@ async function tuiAutoOptimize(configDir, config) {
   const strategy = config.fallback_chain?.strategy || 'performance';
 
   console.log(`[omf] Scanning for available models (strategy: ${strategy})...`);
-  const models = discoverAvailableModels(configDir);
   const apiModelObjs = await discoverProviderApiModels(configDir);
   const apiModelIds = apiModelObjs.map(m => m.id);
-  const allModels = [...new Set([...models, ...apiModelIds])];
+  const allModels = apiModelIds;
 
   if (allModels.length === 0) {
-    console.log(`[omf] No models found in config files.`);
+    console.log(`[omf] No models found via \`opencode models\` CLI.`);
     return false;
   }
-  console.log(`[omf] Discovered ${allModels.length} model(s) (${apiModelIds.length} from CLI)`);
+  console.log(`[omf] Discovered ${allModels.length} model(s) via CLI`);
 
-  // Build linked list chain
   const { chain, links, head } = buildFallbackChain(allModels, strategy);
   console.log(`[omf] Chain head: ${head}`);
   console.log(`[omf] Chain (${chain.length} models): ${chain.join(' → ')}`);
@@ -1375,20 +1285,6 @@ async function tuiAutoOptimize(configDir, config) {
   config.fallback_chain.links = links;
   config.fallback_chain.head = head;
   config.fallback_models.default = chain;
-
-  if (config.fallback_models.agents) {
-    const agentKeys = Object.keys(config.fallback_models.agents);
-    if (agentKeys.length > 0) {
-      for (const agentName of agentKeys) {
-        const topTier = OMO_MODEL_DB.classify(head);
-        const currentTier = OMO_MODEL_DB.classify(config.fallback_models.agents[agentName]?.[0]);
-        if (!currentTier || (topTier && currentTier.score < topTier.score)) {
-          config.fallback_models.agents[agentName] = [...chain];
-        }
-      }
-      console.log(`[omf] Updated ${agentKeys.length} per-agent chain(s)`);
-    }
-  }
 
   const configPath = join(configDir, 'omf.json');
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
@@ -1409,7 +1305,7 @@ async function tuiManualChain(configDir, config) {
     if (input.toLowerCase() === 'list') {
       const models = discoverAvailableModels(configDir);
       if (models.length === 0) {
-        console.log(`[omf] No models discovered from configs.`);
+        console.log(`[omf] No models from file discovery (run \`opencode models\` to discover).`);
       } else {
         models.forEach((m) => {
           const cls = OMO_MODEL_DB.classify(m);
@@ -1545,38 +1441,27 @@ async function tuiInit(configDir, config) {
     OMO_MODEL_DB._configTiers = config.model_tiers;
   }
 
-  // 1. Discover ALL models via `opencode models` CLI
   const apiModelObjs = await discoverProviderApiModels(configDir);
   const apiModelIds = apiModelObjs.map(m => m.id);
-  const fileModels = discoverAvailableModels(configDir);
-  const allModels = [...new Set([...apiModelIds, ...fileModels])];
+  const allModels = apiModelIds;
 
-  console.log(`\n[omf] Models discovered:`);
-  console.log(`[omf]   Via CLI: ${apiModelIds.length} models`);
-  console.log(`[omf]   Via config files: ${fileModels.length} models`);
-  console.log(`[omf]   Total unique: ${allModels.length} models`);
+  console.log(`\n[omf] Models discovered via CLI: ${allModels.length}`);
 
   if (allModels.length === 0) {
     console.log(`[omf] No models found. Ensure OpenCode is installed and \`opencode\` is in PATH.`);
     return false;
   }
 
-  // 2. Auto-classify models and build model_tiers
   const newTiers = { premium: [], balanced: [], fast: [], cheap: [] };
 
   for (const modelId of allModels) {
-    // Prefer cost-based tier from API response
     const apiObj = apiModelObjs.find(m => m.id === modelId);
     const costTier = classifyByCost(apiObj?.cost);
-
-    // Fallback to regex pattern matching
     const patternTier = OMO_MODEL_DB.classify(modelId);
-
     const tier = costTier || patternTier?.tier || 'balanced';
     newTiers[tier].push(modelId);
   }
 
-  // Show classified models
   for (const [tierName, models] of Object.entries(newTiers)) {
     if (models.length === 0) continue;
     const score = TIER_SCORES[tierName];
@@ -1588,58 +1473,33 @@ async function tuiInit(configDir, config) {
     });
   }
 
-  // 3. Discover agents & categories
   const agentEntries = discoverAgentEntries(configDir);
   const agentKeys = Object.keys(agentEntries);
-  console.log(`\n[omf] Agents / Categories (${agentKeys.length} total):`);
+  console.log(`\n[omf] Current subagent model assignments (from oh-my-openagent.json):`);
   if (agentKeys.length === 0) {
-    console.log(`[omf] (none found — oh-my-openagent.json not configured)`);
+    console.log(`[omf] (none found)`);
   } else {
     agentKeys.sort().forEach((name) => {
       const entry = agentEntries[name];
       const modelLabel = entry.model || '(no primary model)';
-      console.log(`[omf] ${name}`);
-      console.log(`[omf] primary: ${modelLabel}`);
+      const typeLabel = entry.type === 'category' ? '[category]' : '[agent]';
+      console.log(`[omf] ${typeLabel} ${name}: ${modelLabel}`);
     });
   }
 
-  // 4. Apply model_tiers to OMO_MODEL_DB for ranking
   OMO_MODEL_DB._configTiers = newTiers;
 
-  // 5. Propose optimized default chain using selected strategy
   const strategy = config.fallback_chain?.strategy || 'performance';
   const { chain: optimizedDefault, links } = buildFallbackChain(allModels, strategy);
-  console.log(`\n[omf] Proposed default fallback chain (strategy: ${strategy}, ${optimizedDefault.length} models):`);
+  console.log(`\n[omf] Proposed unified fallback chain (strategy: ${strategy}, ${optimizedDefault.length} models):`);
   optimizedDefault.forEach((m, i) => {
     const cls = OMO_MODEL_DB.classify(m);
     const label = cls ? ` (${cls.name})` : '';
     console.log(`[omf] ${i + 1}) ${m}${label}`);
   });
 
-  // 6. Propose per-agent/category chains
-  const proposedAgentChains = {};
-  for (const [name, entry] of Object.entries(agentEntries)) {
-    const pool = entry.model
-      ? [entry.model, ...allModels.filter(m => m !== entry.model)]
-      : allModels;
-    const chain = OMO_MODEL_DB.optimize(pool, 6);
-    proposedAgentChains[name] = chain;
-  }
-
-  const agentOnlyKeys = agentKeys.filter(k => agentEntries[k].type === 'agent').sort();
-  if (agentOnlyKeys.length > 0) {
-    console.log(`\n[omf] Proposed per-agent fallback chains (showing first 3):`);
-    agentOnlyKeys.slice(0, 3).forEach((name) => {
-      console.log(`[omf] ${name}: [${proposedAgentChains[name].join(', ')}]`);
-    });
-    if (agentOnlyKeys.length > 3) {
-      console.log(`[omf] ... and ${agentOnlyKeys.length - 3} more agent(s)`);
-    }
-  }
-
-  // 7. Confirm
   console.log(``);
-  const ok = await readLine(`[omf] Apply proposed configuration? (y/n/detail): `);
+  const ok = await readLine(`[omf] Apply proposed configuration? (y/n): `);
   const answer = ok.trim().toLowerCase();
 
   if (answer === 'y' || answer === 'yes') {
@@ -1650,54 +1510,12 @@ async function tuiInit(configDir, config) {
     config.fallback_chain.links = links;
     config.fallback_chain.head = optimizedDefault[0] || null;
 
-    for (const [name, chain] of Object.entries(proposedAgentChains)) {
-      const entry = agentEntries[name];
-      if (entry.type === 'category') {
-        config.fallback_models.agents[entry.rawName] = chain;
-      } else {
-        config.fallback_models.agents[name] = chain;
-      }
-    }
-
     const configPath = join(configDir, 'omf.json');
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
     console.log(`[omf] Config saved to ${configPath}`);
-    console.log(`[omf] Model tiers written to omf.json — future classifications will use this data.`);
+    console.log(`[omf] Model tiers written to omf.json.`);
     console.log(`[omf] Init complete. Restart OpenCode for changes to take effect.`);
     return true;
-  }
-
-  if (answer === 'detail') {
-    console.log(`\n[omf] Full per-agent proposal:`);
-    let idx = 1;
-    const allNames = agentKeys.sort();
-    for (const name of allNames) {
-      console.log(`[omf] ${idx}) ${name}`);
-      console.log(`[omf] chain: [${proposedAgentChains[name].join(', ')}]`);
-      idx++;
-    }
-    console.log(`[omf] ${idx}) default chain`);
-    console.log(`[omf] chain: [${optimizedDefault.join(', ')}]`);
-
-    const sel = await readLine(`\n[omf] Enter number to customize, or 'apply' to apply all: `);
-    if (sel.trim() === 'apply') {
-      config.model_tiers = newTiers;
-      config.fallback_models.default = optimizedDefault;
-      for (const [name, chain] of Object.entries(proposedAgentChains)) {
-        const entry = agentEntries[name];
-        if (entry.type === 'category') {
-          config.fallback_models.agents[entry.rawName] = chain;
-        } else {
-          config.fallback_models.agents[name] = chain;
-        }
-      }
-      const configPath = join(configDir, 'omf.json');
-      writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Init complete. Model tiers saved to omf.json.`);
-      return true;
-    }
-    console.log(`[omf] Init cancelled.`);
-    return false;
   }
 
   console.log(`[omf] Init cancelled.`);
