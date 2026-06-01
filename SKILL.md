@@ -11,15 +11,10 @@ Handle `/omf` requests by reading/writing the `omf.json` config file directly. T
 
 | Command | Action |
 |---|---|
-| `/omf` | Show status (current config overview) |
+| `/omf` | Show TUI menu |
 | `/omf status` | Show full config details |
-| `/omf optimize` | Auto-discover and rank models |
-| `/omf add <model>` | Add model to end of fallback chain |
-| `/omf remove <n>` | Remove model at position N |
-| `/omf set <n> <model>` | Replace model at position N |
-| `/omf retries <n>` | Set max_retries |
-| `/omf cooldown <n>` | Set cooldown_seconds |
-| `/omf auto` | Toggle auto_optimize on/off |
+| `/omf optimize [strategy]` | Auto-discover via `opencode models` CLI, rank by strategy |
+| `/omf init` | Interactive init: discover models + agents, build chain |
 
 ## Detection
 
@@ -42,10 +37,12 @@ Read `omf.json` with your file tools. The schema is:
 ```json
 {
   "fallback_models": {
-    "default": ["model-a", "model-b", "model-c"],
-    "agents": {
-      "agent-name": ["model-x", "model-y"]
-    }
+    "default": ["opencode/big-pickle", "axon/gpt-5.4", "axon/claude-sonnet"]
+  },
+  "fallback_chain": {
+    "strategy": "performance",
+    "head": "opencode/big-pickle",
+    "links": {}
   },
   "options": {
     "max_retries": 3,
@@ -63,15 +60,17 @@ If the file doesn't exist, create it with sensible defaults.
 
 #### `/omf` or `/omf status`
 Read and display the current config in a readable format. Show:
-- Fallback chain order with numbered positions
-- Per-agent overrides (if any)
-- Options summary
+- Fallback chain order with numbered positions and tier labels
+- Options summary (max_retries, cooldown, auto_optimize, detection flags)
+- Evolution status (enabled/disabled with thresholds)
 
-#### `/omf optimize`
-Read the user's OpenCode config files to discover available models:
-1. `~/.config/opencode/opencode.json` — extract model IDs from all providers
-2. `~/.config/opencode/oh-my-openagent.json` — extract model strings
-3. `~/.config/opencode/omf.json` — existing fallback chain
+#### `/omf optimize [strategy]`
+Discover available models via `opencode models` CLI, then build an optimized fallback chain.
+
+1. Run `opencode models` to discover all available models
+2. Classify each model into capability tiers (premium > balanced > fast > cheap)
+3. Build a linked list chain with the given strategy (performance/price/feature/comprehensive)
+4. Write the result to `omf.json`
 
 Rank models by capability tier (from best to worst):
 - **premium**: `big-pickle`, `gpt-5`, `claude-sonnet-4`, `claude-opus`
@@ -79,28 +78,18 @@ Rank models by capability tier (from best to worst):
 - **fast**: `claude-haiku`, `gpt-4-mini`, `gemini-flash`, `deepseek-chat`
 - **cheap**: `gpt-3.5`, `mixtral`, `llama`
 
-Build a chain by taking highest-tier models first, max 6 entries. Write the result to `omf.json`.
+Available strategies:
+- `performance` (default): Highest tier first
+- `price`: Cheapest first
+- `feature`: Capability overlap with chain head
+- `comprehensive`: 40% performance + 30% price + 30% feature
 
-#### `/omf add <model>`
-Read the current chain, append `<model>` to the end, write back.
-
-#### `/omf remove <n>`
-Remove the model at position N (1-based) from the chain.
-
-#### `/omf set <n> <model>`
-Replace the model at position N (1-based).
-
-#### `/omf retries <n>`
-Update `options.max_retries`.
-
-#### `/omf cooldown <n>`
-Update `options.cooldown_seconds`.
-
-#### `/omf auto`
-Toggle `options.auto_optimize` on/off.
-
-#### `/omf agent <name> <models...>`
-Set per-agent fallback: add/update `fallback_models.agents["<name>"]` with the listed models. Use `/omf agent <name>` (no models) to remove the agent override.
+#### `/omf init`
+Interactive discovery and configuration. Shows:
+- All discovered models with tier labels and cost info
+- Current subagent model assignments from `oh-my-openagent.json` (if present)
+- Proposed unified fallback chain
+- Prompts user to apply configuration
 
 ### 4. Edit config
 
