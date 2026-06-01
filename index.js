@@ -268,64 +268,26 @@ function loadConfig(configDir) {
 
 // ─── Model Discovery (CLI only) ────────────────────────────────────────────
 
-function discoverAvailableModels(configDir) {
-  return [];
-}
+// Model discovery is done via discoverProviderApiModels() which calls
+// \`opencode models\` CLI. No file-based discovery is used.
 
 async function discoverProviderApiModels(configDir) {
   try {
     const output = execSync('opencode models', { encoding: 'utf-8', timeout: 15000 });
     const lines = output.trim().split('\n').filter(Boolean);
     
-    const testedModels = [];
-    for (const line of lines) {
-      const id = line.trim();
-      if (!id) continue;
-      
-      try {
-        const startTime = Date.now();
-        const testOutput = execSync(`opencode run -m ${id} 'ping' --format json`, { 
-          encoding: 'utf-8', 
-          timeout: 10000 
-        });
-        const endTime = Date.now();
-        const latency = endTime - startTime;
-        
-        const response = JSON.parse(testOutput);
-        const success = response && response.length > 0;
-        
-        testedModels.push({ 
-          id, 
-          name: id.split('/').pop() || id, 
-          cost: null, 
-          source: 'cli',
-          latency, 
-          success,
-          lastTested: Date.now()
-        });
-        
-        logModelOutcome(configDir, id, success, latency);
-        
-      } catch (error) {
-        const latency = 9999;
-        testedModels.push({ 
-          id, 
-          name: id.split('/').pop() || id, 
-          cost: null, 
-          source: 'cli',
-          latency, 
-          success: false,
-          lastTested: Date.now()
-        });
-        
-        logModelOutcome(configDir, id, false, 9999);
-        
-        console.log(`[omf] Test failed for ${id}: ${error.message}`);
-      }
-    }
-    
-    console.log(`[omf] Tested ${testedModels.length} models via \`opencode models\` CLI`);
-    return testedModels;
+    const models = lines
+      .map(id => id.trim())
+      .filter(Boolean)
+      .map(id => ({
+        id,
+        name: id.split('/').pop() || id,
+        cost: null,
+        source: 'cli',
+      }));
+
+    console.log(`[omf] Discovered ${models.length} models via \`opencode models\` CLI`);
+    return models;
   } catch (e) {
     console.log(`[omf] \`opencode models\` CLI failed: ${e.message}`);
     return [];
@@ -1303,14 +1265,14 @@ async function tuiManualChain(configDir, config) {
     const input = line.trim();
     if (input.toLowerCase() === 'done') break;
     if (input.toLowerCase() === 'list') {
-      const models = discoverAvailableModels(configDir);
-      if (models.length === 0) {
-        console.log(`[omf] No models from file discovery (run \`opencode models\` to discover).`);
+      const apiModels = await discoverProviderApiModels(configDir);
+      if (apiModels.length === 0) {
+        console.log(`[omf] \`opencode models\` returned no models. Ensure OpenCode is running.`);
       } else {
-        models.forEach((m) => {
-          const cls = OMO_MODEL_DB.classify(m);
+        apiModels.forEach((m) => {
+          const cls = OMO_MODEL_DB.classify(m.id);
           const label = cls ? ` (${cls.name})` : '';
-          console.log(`[omf]   ${m}${label}`);
+          console.log(`[omf]   ${m.id}${label}`);
         });
       }
       continue;
@@ -1690,7 +1652,6 @@ export {
   OMO_MODEL_DB,
   TIER_SCORES,
   classifyByCost,
-  discoverAvailableModels,
   buildFallbackChain,
   discoverProviderApiModels,
   discoverAgentEntries,
