@@ -79,7 +79,6 @@ const defaultConfig = {
     min_observations: 5,
     promote_threshold: 0.7,
     demote_threshold: 0.3,
-    max_chain_size: 6,
     new_model_behavior: 'append',
   },
 };
@@ -553,7 +552,6 @@ const EVOLVE_DEFAULTS = {
   min_observations: 5,
   promote_threshold: 0.7,
   demote_threshold: 0.3,
-  max_chain_size: 6,
   new_model_behavior: 'append',
 };
 
@@ -669,8 +667,18 @@ function evolveFallbackChain(configDir, config) {
   const evolveOpts = { ...EVOLVE_DEFAULTS, ...(config.evolve || {}) };
   if (!evolveOpts.enabled) return false;
 
-  const currentChain = config.fallback_models?.default || [];
-  if (currentChain.length === 0) return false;
+  const links = config.fallback_chain?.links;
+  const head = config.fallback_chain?.head;
+  if (!links || !head) return false;
+
+  // Collect all models in chain order
+  const order = [];
+  let current = head;
+  while (current) {
+    order.push(current);
+    current = links[current];
+  }
+  if (order.length === 0) return false;
 
   const performance = analyzeModelPerformance(configDir, evolveOpts.min_observations);
 
@@ -685,28 +693,33 @@ function evolveFallbackChain(configDir, config) {
   const perfByModel = {};
   for (const p of performance) perfByModel[p.model] = p;
 
-  const promoted = currentChain.filter(m => promoteSet.has(m));
-  const demoted = currentChain.filter(m => demoteSet.has(m));
-  const unchanged = currentChain.filter(m => !promoteSet.has(m) && !demoteSet.has(m));
+  const promoted = order.filter(m => promoteSet.has(m));
+  const demoted = order.filter(m => demoteSet.has(m));
+  const unchanged = order.filter(m => !promoteSet.has(m) && !demoteSet.has(m));
 
   promoted.sort((a, b) => (perfByModel[b]?.successRate || 0) - (perfByModel[a]?.successRate || 0));
 
   let newModels = [];
   if (evolveOpts.new_model_behavior === 'append') {
-    newModels = discoverNewModels(currentChain, configDir);
+    newModels = discoverNewModels(order, configDir);
     if (newModels.length > 0) {
       console.log(`[omf] Discovered new model(s): ${newModels.join(', ')}`);
     }
   }
 
-  let finalChain = [...promoted, ...unchanged, ...demoted, ...newModels];
-  if (finalChain.length > evolveOpts.max_chain_size) {
-    finalChain = finalChain.slice(0, evolveOpts.max_chain_size);
-  }
+  const newOrder = [...promoted, ...unchanged, ...demoted, ...newModels];
 
-  if (finalChain.join(',') !== currentChain.join(',')) {
-    config.fallback_models.default = finalChain;
-    console.log(`[omf] Evolved fallback chain: [${finalChain.join(', ')}]`);
+  if (newOrder.join(',') !== order.join(',')) {
+    // Rebuild linked list
+    const newLinks = {};
+    for (let i = 0; i < newOrder.length - 1; i++) {
+      newLinks[newOrder[i]] = newOrder[i + 1];
+    }
+    config.fallback_chain.links = newLinks;
+    config.fallback_chain.head = newOrder[0];
+    config.fallback_models.default = newOrder;
+
+    console.log(`[omf] Evolved fallback chain: [${newOrder.join(', ')}]`);
 
     const configPath = join(configDir, 'omf.json');
     try {
@@ -1217,7 +1230,7 @@ async function showStatus(config) {
 
   const evolve = config.evolve || {};
   console.log(`[omf] Evolve: ${evolve.enabled ? 'enabled' : 'disabled'}` +
-    (evolve.enabled ? ` (min_obs=${evolve.min_observations}, promote≥${evolve.promote_threshold}, demote≤${evolve.demote_threshold}, max_chain=${evolve.max_chain_size})` : ''));
+    (evolve.enabled ? ` (min_obs=${evolve.min_observations}, promote≥${evolve.promote_threshold}, demote≤${evolve.demote_threshold})` : ''));
 }
 
 async function tuiAutoOptimize(configDir, config) {
@@ -1606,7 +1619,6 @@ async function handleCommand({ name, args }) {
             console.log(`[omf]   min_observations: ${evolveOpts.min_observations}`);
             console.log(`[omf]   promote_threshold: ${evolveOpts.promote_threshold}`);
             console.log(`[omf]   demote_threshold: ${evolveOpts.demote_threshold}`);
-            console.log(`[omf]   max_chain_size: ${evolveOpts.max_chain_size}`);
             console.log(`[omf]   new_model_behavior: ${evolveOpts.new_model_behavior}`);
             const performance = analyzeModelPerformance(configDir, 0);
             if (performance.length > 0) {
