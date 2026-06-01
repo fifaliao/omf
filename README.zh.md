@@ -1,67 +1,70 @@
 # omf — Oh My Fallback
 
 <p align="center">
-  <a href="README.md"><strong>🇬🇧 English</strong></a> ·
-  <a href="README.zh.md"><strong>🇨🇳 中文</strong></a>
+  <a href="README.zh.md"><strong>🇬🇧 English</strong></a> ·
+  <a href="README.md"><strong>🇨🇳 中文</strong></a>
 </p>
 
-**OpenCode 智能模型回退编排引擎。**
+**Intelligent model fallback orchestration for [OpenCode](https://opencode.ai).**
 
-当模型失败（错误、空响应、拒绝回答、额度超限）时，`omf` 不是简单线性重试——它**遍历预计算的链表**，在 O(1) 时间内找到下一个最优模型，跳过冷却中的模型、绕过熔断的 provider、保留完整的对话上下文。
+When a model fails (error, empty response, refusal, quota exceeded), `omf` doesn't just retry linearly — it **walks a precomputed linked list** to the next-best model in O(1) time, skipping cooldowns, respecting circuit breakers, and preserving full conversation context.
 
 ---
 
-## 为什么用 omf？
+## Why omf?
 
-| 问题 | omf 方案 |
+| Problem | omf Solution |
 |---|---|
-| 💥 模型返回 429/5xx | 自动中止 + **O(1) 链表**回退到下一模型 |
-| 🤐 模型拒绝或返回空 | 内容级检测（空响应、拒绝模式、额度超限、自定义正则） |
-| 🔥 Provider 宕机连带所有模型不可用 | 熔断器——跳过整个 provider N 秒 |
-| 📉 模型质量未知 | 自进化追踪实际调用结果，自动重排回退链 |
-| 🎯 手动与 agent 需要不同回退链 | `omf.json` 中按 agent 覆盖，零耦合 |
-| 🧠 "哪个模型该回退给谁？" | 4 种策略——性能、价格、功能匹配、综合 |
+| 💥 Model returns 429/5xx | Auto-abort + retry next model in **O(1)** via linked list |
+| 🤐 Model refuses or responds empty | Content-level detection (empty, refusal, usage limit, custom regex) |
+| 🔥 Provider outage takes down all its models | Circuit breaker — skip entire provider for N seconds |
+| 📉 Unknown model quality | Self-evolution tracks real outcomes and reorders the chain |
+| 🎯 Manual vs agent need different fallback chains | Per-agent overrides in `omf.json`, zero coupling |
+| 🧠 "Which model should fallback to what?" | 4 strategies — performance, price, feature match, comprehensive |
 
 ---
 
-## 工作原理
+## How It Works
 
 ```
-任意会话（手动或 agent）
+Any session (manual or agent)
      │
-     ├── 模型失败（429/5xx/空响应/拒绝/额度超限）
+     ├── Model fails (429/5xx/empty/refusal/quota)
      │
      ▼
 ┌─────────────────────┐
-│  omf 检测流水线      │
-│  • HTTP 状态码       │
-│  • 响应内容检查      │
-│  • 自定义正则        │
+│  omf detection       │
+│  pipeline            │
+│  • HTTP status check │
+│  • Content check     │
+│  • Custom regex      │
 └────────┬────────────┘
          │
          ▼
 ┌─────────────────────┐
-│  健康与安全          │
-│  • 单模型冷却        │
-│  • Provider 熔断    │
-│  • 健康检查          │
+│  Health & safety     │
+│  • Per-model cooldown│
+│  • Provider breaker  │
+│  • Health check      │
 └────────┬────────────┘
          │
          ▼
 ┌─────────────────────┐
-│  链表遍历 O(1)       │
-│  回退决议             │
-│  （无线性扫描）      │
+│  Linked list walk   │
+│  O(1) fallback      │
+│  resolution          │
+│  (no linear scan)   │
 └────────┬────────────┘
          │
          ▼
-    用下一模型重新发起
-    → 对话继续
+    Re-prompt with
+    next model →
+    conversation continues
 ```
 
-### 链表架构
+### Linked List Architecture
 
-传统回退链使用平面数组——每次回退都从索引 0 扫描，重试已经失败过的模型。`omf` 使用**链表**：
+Traditional fallback chains use flat arrays — every fallback scans from index 0, retrying models you've already failed. `omf` uses a **linked list**:
 
 ```json
 {
@@ -78,128 +81,128 @@
 }
 ```
 
-每个模型只指向**一个回退目标**。解析复杂度 O(1)——无需索引扫描，5 跳内无重复重试。构建时自动检测循环；若发现循环，自动回退到 `performance` 策略。
+Each model points to exactly **one fallback**. Resolution is O(1) — no index scanning, no duplicate retries across 5 hops. Cycle detection runs at build time; if a cycle is found, the chain auto-falls-back to `performance` strategy.
 
 ---
 
-## 4 种回退策略
+## 4 Fallback Strategies
 
-`omf` 对 OpenCode 安装中的**所有模型打分**（通过 `opencode models` CLI 发现 118+ 个模型），按优先级构建链表。
+`omf` scores **every model in your OpenCode installation** (118+ discovered via `opencode models`) and links them by priority.
 
-| 策略 | 排序依据 | 适用场景 |
+| Strategy | Sorts By | Best For |
 |---|---|---|
-| `performance` | 能力层级分（premium > balanced > fast > cheap） | 追求最高响应质量 |
-| `price` | 层级分取反（cheap 优先） | 成本敏感的负载 |
-| `feature` | 能力重叠度 + 层级对齐度 | 回退后能力不降级 |
-| `comprehensive` | 40% 性能 + 30% 价格 + 30% 功能 | 各项均衡 |
+| `performance` | Tier score (premium > balanced > fast > cheap) | Maximum response quality |
+| `price` | Inverted tier (cheap first) | Cost-sensitive workloads |
+| `feature` | Capability overlap + tier alignment | Feature parity in fallback |
+| `comprehensive` | 40% perf + 30% price + 30% feature | Balanced everything |
 
-通过 `/omf optimize <strategy>` 或在 `omf.json` → `fallback_chain.strategy` 中设置。
+Set via `/omf optimize <strategy>` or in `omf.json` → `fallback_chain.strategy`.
 
 ```bash
-# 性能优先（默认）
+# Performance-first (default)
 /omf optimize
 
-# 价格优化
+# Price-optimized
 /omf optimize price
 
-# 功能匹配
+# Feature-match
 /omf optimize feature
 
-# 综合均衡
+# Balanced
 /omf optimize comprehensive
 ```
 
-### Feature 策略详解
+### Feature Strategy
 
-`feature` 策略通过解析模型 ID 推断能力：
-- **vision**：图像生成、视觉语言模型
-- **code**：coder/codex/codeqwen 变体
-- **reasoning**：reasoner/reasoning 模型
-- **fast**：flash/haiku/fast/mini/nano 变体
-- **streaming + tools**：所有非 embedding 模型
+`feature` match infers model capabilities by parsing model IDs:
+- **vision**: image generation, vision-language models
+- **code**: coder/codex/codeqwen variants
+- **reasoning**: reasoner/reasoning models
+- **fast**: flash/haiku/fast/mini/nano variants
+- **streaming + tools**: all non-embedding models
 
-与链头共享 60%+ 能力的模型得分最高。回退后能力不降级——不只看层级。
+A model that shares 60%+ capabilities with the chain head scores highest. Fallback preserves capability — not just tier.
 
 ---
 
-## 安装
+## Installation
 
-### 在线安装（一行命令）
+### Online install (one-liner)
 
 ```bash
-# 预览（不做任何更改）
+# Preview (no changes)
 curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash
 
-# 应用更改
+# Apply
 curl -fsSL https://raw.githubusercontent.com/fifaliao/omf/main/install.sh | bash -s -- --apply
 ```
 
-脚本自动检测在线模式，克隆到 `~/.config/opencode/plugins/omf`（Linux/macOS）或 `%APPDATA%\opencode\plugins\omf`（Windows），注册插件并创建默认配置。
+The script auto-detects online mode, clones to `~/.config/opencode/plugins/omf` (Linux/macOS) or `%APPDATA%\opencode\plugins\omf` (Windows), registers the plugin, and creates default config.
 
-### 本地安装
+### Local install
 
 ```bash
 cd /path/to/omf
 chmod +x install.sh
-./install.sh          # 预览
-./install.sh --apply  # 应用
+./install.sh          # preview
+./install.sh --apply  # apply
 ```
 
-或在 `~/.config/opencode/opencode.json` 中手动添加：
+Or manually add to `~/.config/opencode/opencode.json`:
 ```json
 { "plugin": ["file:///path/to/omf"] }
 ```
-重启 OpenCode，查看 `[omf]` 日志确认加载成功。
+Then restart OpenCode. Verify with `[omf]` log messages.
 
-### 交互式配置（TUI）
+### Interactive Configuration (TUI)
 
 ```bash
 ./install.sh --configure --apply
 ```
 
-或编程调用：
+Or programmatically:
 ```js
 import { runTUI } from 'omf';
-await runTUI();                  // 默认配置目录
-await runTUI('/custom/path');    // 自定义目录
+await runTUI();                  // default config dir
+await runTUI('/custom/path');    // custom config dir
 ```
 
-TUI 支持：
-- **显示状态** — 查看回退链、策略、按 agent 覆盖
-- **自动优化** — 选择策略，构建链表，持久化
-- **手动配置链** — 逐个输入模型并验证格式
-- **编辑选项** — 修改 max_retries、cooldown、auto_optimize、检测设置
-- **初始化（Init）** — 发现所有 agent 并配置按 agent 回退链
+TUI supports:
+- **Show status** — view chain, strategies, per-agent overrides
+- **Auto-optimize** — pick a strategy, build linked list, persist
+- **Manual chain** — enter models with format validation
+- **Edit options** — retries, cooldown, auto_optimize, detection
+- **Init** — discover all agents and configure per-agent chains
 
 ---
 
-## 聊天内命令 (`/omf`)
+## In-Chat Commands (`/omf`)
 
-由 `install.sh --apply` 自动安装。omf skill 教导 OpenCode 直接在聊天中编辑配置：
+Installed automatically by `install.sh --apply`. The omf skill teaches OpenCode to edit config directly:
 
 ```
-/omf status                  # 显示当前配置
-/omf optimize [strategy]     # 自动发现 118+ 模型，构建链表
-/omf add axon/deepseek       # 追加模型到链尾
-/omf remove 3                # 删除第 3 个模型
-/omf set 2 axon/gpt-5.4      # 替换第 2 个模型
-/omf retries 5               # 设置 max_retries
-/omf cooldown 30             # 设置 cooldown_seconds
-/omf auto                    # 开关 auto_optimize
-/omf evolve on               # 启用自进化
-/omf evolve status           # 查看模型性能统计
+/omf status                  # show current config
+/omf optimize [strategy]     # auto-discover 118+ models, build linked list
+/omf add axon/deepseek       # append model to chain
+/omf remove 3                # remove model at position 3
+/omf set 2 axon/gpt-5.4      # replace model at position 2
+/omf retries 5               # set max_retries
+/omf cooldown 30             # set cooldown_seconds
+/omf auto                    # toggle auto_optimize
+/omf evolve on               # enable self-evolution
+/omf evolve status           # show model performance stats
 ```
 
 ---
 
-## 自进化
+## Self-Evolution
 
-默认启用。追踪模型调用结果（成功/失败/延迟），自动调整回退链：
+Enabled by default. Tracks model call outcomes (success/failure/latency) and automatically reorders the chain:
 
-- **晋升**成功率达 70%+ 的模型到链顶
-- **降级**失败率达 30%+ 的模型到链底
-- **发现**配置中出现的新模型并自动追加
-- 数据存储在 `evolve.jsonl`
+- **Promote** models with ≥70% success rate to chain top
+- **Demote** models with ≤30% success rate to chain bottom
+- **Discover** new models appearing in configs and auto-append
+- Data stored in `evolve.jsonl`
 
 ```json
 {
@@ -216,21 +219,21 @@ TUI 支持：
 
 ---
 
-## 自动优化
+## Auto-Optimization
 
-在 `omf.json` 中设置 `auto_optimize: true` 可在每次插件加载时自动重建回退链：
+Set `auto_optimize: true` in `omf.json` to rebuild the fallback chain on every plugin load:
 
 ```json
 { "options": { "auto_optimize": true } }
 ```
 
-使用 `opencode models` CLI 发现所有模型，按配置的策略执行 `buildFallbackChain()`，写入并生效。
+Runs `buildFallbackChain()` with the configured strategy, using all models discovered from `opencode models` CLI.
 
 ---
 
-## 配置
+## Configuration
 
-`omf.json` 位于平台对应的配置目录（Linux/macOS: `~/.config/opencode/`，Windows: `%APPDATA%\opencode\`）。
+`omf.json` lives at the platform-appropriate config directory (`~/.config/opencode/` on Linux/macOS, `%APPDATA%\opencode\` on Windows).
 
 ```json
 {
@@ -260,24 +263,24 @@ TUI 支持：
 }
 ```
 
-| 选项 | 描述 | 默认值 |
+| Option | Description | Default |
 |---|---|---|
-| `fallback_models.default` | 默认回退链（平面数组，用于展示） | — |
-| `fallback_models.agents` | 按 agent 覆盖（仅存于 `omf.json`） | `{}` |
-| `fallback_chain.strategy` | 排序策略：performance/price/feature/comprehensive | `performance` |
-| `fallback_chain.head` | 链表头（第一个尝试的模型） | 链中首个模型 |
-| `fallback_chain.links` | 链表：每个模型 → 它的回退目标 | — |
-| `max_retries` | 每会话最大回退次数 | 3 |
-| `cooldown_seconds` | 失败模型冷却秒数 | 30 |
-| `retry_on_errors` | 触发回退的 HTTP 状态码 | `[429, 500, 502, 503, 504]` |
-| `provider_cooldown_seconds` | 熔断：同一 provider 所有模型跳过秒数 | 60 |
-| `notify_on_fallback` | 回退时显示 toast | `true` |
-| `detect.empty` | 检测空响应 | `true` |
-| `detect.refusal` | 检测拒绝模式（"I'm sorry..."） | `true` |
-| `detect.usage_limit` | 检测额度超限（额度失败、余额不足） | `true` |
-| `detect.custom_patterns` | 用户自定义失败检测正则数组 | `[]` |
+| `fallback_models.default` | Default fallback chain (flat array for display) | — |
+| `fallback_models.agents` | Per-agent overrides in `omf.json` | `{}` |
+| `fallback_chain.strategy` | Sorting strategy: performance/price/feature/comprehensive | `performance` |
+| `fallback_chain.head` | Linked list head (first model to try) | first model in chain |
+| `fallback_chain.links` | Linked list: each model → its fallback | — |
+| `max_retries` | Max fallback attempts per session | 3 |
+| `cooldown_seconds` | Seconds before retrying a failed model | 30 |
+| `retry_on_errors` | HTTP status codes triggering fallback | `[429, 500, 502, 503, 504]` |
+| `provider_cooldown_seconds` | Circuit breaker: skip all models from failing provider for N seconds | 60 |
+| `notify_on_fallback` | Show toast on fallback | `true` |
+| `detect.empty` | Detect and retry on empty responses | `true` |
+| `detect.refusal` | Detect refusal patterns ("I'm sorry...") | `true` |
+| `detect.usage_limit` | Detect quota/usage exceeded (中文: 额度失败, 余额不足) | `true` |
+| `detect.custom_patterns` | User-defined failure regex array | `[]` |
 
-### 按 agent 设置回退
+### Per-agent fallback
 
 ```json
 {
@@ -290,11 +293,11 @@ TUI 支持：
 }
 ```
 
-失败时，`omf` 读取该 agent 的覆盖链。没有覆盖则使用默认链。
+On failure, `omf` reads the override and falls back within that agent's chain. If no override exists, the default chain is used.
 
 ---
 
-## 插件 API
+## Plugin API
 
 ```typescript
 export default async function plugin(
@@ -303,66 +306,66 @@ export default async function plugin(
 ): Promise<PluginHooks>
 ```
 
-### 处理的事件
+### Events handled
 
-| 事件 | 行为 |
+| Event | Action |
 |---|---|
-| `message.updated` | 错误/内容检测 → 回退 |
-| `session.error` | 会话级错误（被动，委托给 `message.updated`） |
+| `message.updated` | Error/content detection → fallback |
+| `session.error` | Session-level error (passive, defers to `message.updated`) |
 
-### 检测流水线
+### Detection Pipeline
 
 ```
 message.updated
-    ├── HTTP 状态码: 429, 5xx? ───────────→ 回退
-    ├── 空响应? ──────────────────────────→ 回退
-    ├── 拒绝模式? ────────────────────────→ 回退
-    ├── 额度超限? ────────────────────────→ 回退
-    └── 自定义正则匹配? ──────────────────→ 回退
+    ├── HTTP status: 429, 5xx? ─────────────→ fallback
+    ├── Empty response? ────────────────────→ fallback
+    ├── Refusal pattern? ───────────────────→ fallback
+    ├── Usage limit? ───────────────────────→ fallback
+    └── Custom regex match? ────────────────→ fallback
 
-回退决议（链表）:
-    ├── 通过 links[current] 前进
-    ├── 跳过冷却中的模型
-    ├── 跳过熔断 provider 的模型
-    └── 用下一模型重新发起（保留上下文）
+Fallback resolution (linked list):
+    ├── Advance via links[current]
+    ├── Skip models on per-model cooldown
+    ├── Skip models from circuit-broken providers
+    └── Re-prompt with next model (context preserved)
 ```
 
-### 导出函数
+### Exported Functions
 
-| 函数 | 描述 |
+| Function | Description |
 |---|---|
-| `runTUI(configDir?)` | 启动交互式 TUI 配置 |
-| `handleCommand({name, args})` | 处理 `/omf` 命令 |
-| `buildFallbackChain(models, strategy)` | 评分 + 排序 + 构建链表（4 种策略） |
-| `discoverAvailableModels(configDir)` | 从 `opencode models` CLI + 配置文件发现模型 |
-| `discoverProviderApiModels(configDir)` | 通过 `opencode models` CLI 发现模型（唯一方法） |
-| `discoverAgentEntries(configDir)` | 从 `oh-my-openagent.json` 发现 agent |
-| `tuiInit(configDir, config)` | 交互式初始化：发现并配置所有 agent |
-| `tuiAutoOptimize(configDir, config)` | 带策略选择的自动优化 |
-| `OMO_MODEL_DB.classify(modelId)` | 将模型分类到能力层级 |
-| `OMO_MODEL_DB.rank(models)` | 按层级分排序 |
-| `OMO_MODEL_DB.optimize(models, max)` | 构建优化链（旧版，推荐使用 `buildFallbackChain`） |
-| `logModelOutcome(configDir, model, success, latency, errorCode)` | 记录调用结果到 `evolve.jsonl` |
-| `analyzeModelPerformance(configDir, minObservations)` | 分析进化数据 |
-| `evolveFallbackChain(configDir, config)` | 运行自进化 |
+| `runTUI(configDir?)` | Launch interactive TUI configuration |
+| `handleCommand({name, args})` | Handle `/omf` commands |
+| `buildFallbackChain(models, strategy)` | Score + sort + build linked list (4 strategies) |
+| `discoverAvailableModels(configDir)` | Discover models from `opencode models` CLI + configs |
+| `discoverProviderApiModels(configDir)` | Discover models via `opencode models` CLI (sole method) |
+| `discoverAgentEntries(configDir)` | Discover agents from `oh-my-openagent.json` |
+| `tuiInit(configDir, config)` | Interactive init: discover and configure all agents |
+| `tuiAutoOptimize(configDir, config)` | Auto-optimize with strategy selection |
+| `OMO_MODEL_DB.classify(modelId)` | Classify model into capability tier |
+| `OMO_MODEL_DB.rank(models)` | Rank by tier score |
+| `OMO_MODEL_DB.optimize(models, max)` | Build optimized chain (legacy, prefers `buildFallbackChain`) |
+| `logModelOutcome(configDir, model, success, latency, errorCode)` | Log outcome to `evolve.jsonl` |
+| `analyzeModelPerformance(configDir, minObservations)` | Analyze evolution data |
+| `evolveFallbackChain(configDir, config)` | Run self-evolution |
 
 ---
 
-## 开发
+## Development
 
 ```bash
-git clone <仓库地址>
+git clone <repo-url>
 cd omf
-# 编辑 index.js
-# 重启 OpenCode 测试
+# edit index.js
+# restart OpenCode to test
 ```
 
-**无构建步骤。无测试。无 TypeScript。** 纯 ES Module。零外部依赖——永远不需要 `npm install`。
+**No build step. No tests. No TypeScript.** Pure ES module. Zero external dependencies — `npm install` never needed.
 
-查看 `[omf]` 前缀的日志输出以调试。
+Look for `[omf]` prefixed log output for debugging.
 
 ---
 
-## 许可
+## License
 
 MIT
