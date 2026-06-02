@@ -67,6 +67,12 @@ const defaultConfig = {
     health_check: true,
     provider_cooldown_seconds: 60,
     server_url: 'http://127.0.0.1:4096',
+    weights: {
+      enabled: true,
+      success_rate: 70,
+      latency: 30,
+      min_observations: 3,
+    },
   },
   model_tiers: {
     premium: [],
@@ -575,6 +581,76 @@ function logModelOutcome(configDir, modelName, success, latencyMs, errorCode) {
   }
 }
 
+// ─── Real-time model statistics cache (weight-based fallback) ───────────────
+
+const modelStats = {
+  data: new Map(),   // modelName → { successes, failures, totalLatency, count }
+  loaded: false,
+};
+
+function ensureModelStatsLoaded(configDir) {
+  if (modelStats.loaded) return;
+  const logPath = getEvolveLogPath(configDir);
+  if (!existsSync(logPath)) { modelStats.loaded = true; return; }
+  try {
+    const raw = readFileSync(logPath, 'utf-8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        let m = modelStats.data.get(entry.m);
+        if (!m) {
+          m = { successes: 0, failures: 0, totalLatency: 0, count: 0 };
+          modelStats.data.set(entry.m, m);
+        }
+        if (entry.s) m.successes++;
+        else m.failures++;
+        m.totalLatency += entry.l || 0;
+        m.count++;
+      } catch { /* skip malformed lines */ }
+    }
+    modelStats.loaded = true;
+    console.log(`[omf] Loaded ${lines.length} evolve entries (${modelStats.data.size} models)`);
+  } catch (e) {
+    console.log(`[omf] Failed to load evolve data: ${e.message}`);
+    modelStats.loaded = true;
+  }
+}
+
+function recordModelOutcome(configDir, modelName, success, latencyMs, errorCode) {
+  logModelOutcome(configDir, modelName, success, latencyMs, errorCode);
+  let entry = modelStats.data.get(modelName);
+  if (!entry) {
+    entry = { successes: 0, failures: 0, totalLatency: 0, count: 0 };
+    modelStats.data.set(modelName, entry);
+  }
+  if (success) entry.successes++;
+  else entry.failures++;
+  entry.totalLatency += latencyMs || 0;
+  entry.count++;
+}
+
+function scoreModelWithWeights(modelName, weightConfig) {
+  const entry = modelStats.data.get(modelName);
+  const minObs = weightConfig.min_observations || 3;
+  if (!entry || entry.count < minObs) {
+    // Insufficient data → neutral score
+    return 50;
+  }
+
+  const successRate = entry.successes / entry.count;
+  const avgLatency = entry.totalLatency / entry.count;
+
+  // successRate: 0..1, higher is better
+  const successScore = successRate * (weightConfig.success_rate || 70);
+
+  // avgLatency: cap at 10000ms, lower is better
+  const normalizedLatency = Math.min(avgLatency / 10000, 1);
+  const latencyScore = (1 - normalizedLatency) * (weightConfig.latency || 30);
+
+  return successScore + latencyScore;
+}
+
 function analyzeModelPerformance(configDir, minObservations) {
   const logPath = getEvolveLogPath(configDir);
   if (!existsSync(logPath)) return [];
@@ -984,59 +1060,75 @@ const plugin = async (input, options) => {
     const providerCooldown = (config.options.provider_cooldown_seconds || 60) * 1000;
 
     let nextModel = null;
+    const weightConfig = config.options.weights;
 
-    // Linked list resolution: walk from current position
-    if (links) {
-      if (!state.currentFallbackModel) {
-        // First call: start from the chain head
-        state.currentFallbackModel = config.fallback_chain?.head || models[0];
-      } else {
-        // Advance: follow the link pointer
-        const nextFromLinks = links[state.currentFallbackModel];
-        if (nextFromLinks) {
-          state.currentFallbackModel = nextFromLinks;
-        } else {
-          state.currentFallbackModel = null; // end of chain
-        }
-      }
-    }
-
-    // Map currentFallbackModel to flat array index
-    let startIndex = 0;
-    if (state.currentFallbackModel) {
-      startIndex = models.indexOf(state.currentFallbackModel);
-      if (startIndex === -1) startIndex = 0;
-    }
-
-    while (startIndex < models.length) {
-      const candidate = models[startIndex];
-      startIndex++;
-
-      // Skip models on per-model cooldown
-      if (isModelOnCooldown(candidate, state)) continue;
-
-      const parsed = parseModelString(candidate);
-      if (!parsed) continue;
-
-      // Provider circuit breaker
-      const providerTs = state.failedProviders.get(parsed.providerID);
-      if (providerTs && (Date.now() - providerTs) < providerCooldown) {
-        console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
-        continue;
-      }
-
-      // Health check from evolve data
-      if (config.options.health_check !== false) {
-        const health = getRecentModelHealth(configDir, candidate, 3);
-        if (health && health.failures >= 2 && health.total >= 2) {
-          console.log(`[omf] Skipping ${candidate}: recent health (${health.failures}/${health.total} failures)`);
-          state.failedModels.set(candidate, Date.now());
+    if (weightConfig?.enabled) {
+      // Weight-based model selection: score all candidates, pick the best
+      ensureModelStatsLoaded(configDir);
+      const candidates = [];
+      for (const candidate of models) {
+        if (isModelOnCooldown(candidate, state)) continue;
+        const parsed = parseModelString(candidate);
+        if (!parsed) continue;
+        const providerTs = state.failedProviders.get(parsed.providerID);
+        if (providerTs && (Date.now() - providerTs) < providerCooldown) {
+          console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
           continue;
         }
+        candidates.push({
+          modelId: candidate,
+          score: scoreModelWithWeights(candidate, weightConfig),
+        });
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      nextModel = candidates[0]?.modelId || null;
+      if (nextModel) {
+        console.log(`[omf] ${sessionID}: weighted selection → ${nextModel} (score: ${candidates[0].score.toFixed(1)} from ${candidates.length} candidates)`);
+      }
+    } else {
+      // Linked list resolution: walk from current position (legacy mode)
+      if (links) {
+        if (!state.currentFallbackModel) {
+          state.currentFallbackModel = config.fallback_chain?.head || models[0];
+        } else {
+          const nextFromLinks = links[state.currentFallbackModel];
+          if (nextFromLinks) {
+            state.currentFallbackModel = nextFromLinks;
+          } else {
+            state.currentFallbackModel = null;
+          }
+        }
       }
 
-      nextModel = candidate;
-      break;
+      let startIndex = 0;
+      if (state.currentFallbackModel) {
+        startIndex = models.indexOf(state.currentFallbackModel);
+        if (startIndex === -1) startIndex = 0;
+      }
+
+      while (startIndex < models.length) {
+        const candidate = models[startIndex];
+        startIndex++;
+
+        if (isModelOnCooldown(candidate, state)) continue;
+        const parsed = parseModelString(candidate);
+        if (!parsed) continue;
+        const providerTs = state.failedProviders.get(parsed.providerID);
+        if (providerTs && (Date.now() - providerTs) < providerCooldown) {
+          console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
+          continue;
+        }
+        if (config.options.health_check !== false) {
+          const health = getRecentModelHealth(configDir, candidate, 3);
+          if (health && health.failures >= 2 && health.total >= 2) {
+            console.log(`[omf] Skipping ${candidate}: recent health (${health.failures}/${health.total} failures)`);
+            state.failedModels.set(candidate, Date.now());
+            continue;
+          }
+        }
+        nextModel = candidate;
+        break;
+      }
     }
 
     if (!nextModel) {
@@ -1086,7 +1178,7 @@ const plugin = async (input, options) => {
         query: { directory: ctx.directory },
       });
 
-      logModelOutcome(configDir, nextModel, true, Date.now() - fallbackStartTime);
+      recordModelOutcome(configDir, nextModel, true, Date.now() - fallbackStartTime);
       console.log(`[omf] ${sessionID}: fallback → ${nextModel}`);
 
       if (config.options.notify_on_fallback) {
@@ -1104,7 +1196,7 @@ const plugin = async (input, options) => {
         } catch { /* toast is best-effort */ }
       }
     } catch (e) {
-      logModelOutcome(configDir, nextModel, false, Date.now() - fallbackStartTime, extractStatusCode(e));
+      recordModelOutcome(configDir, nextModel, false, Date.now() - fallbackStartTime, extractStatusCode(e));
       console.log(`[omf] ${sessionID}: fallback attempt failed:`, e.message);
       state.failedModels.set(nextModel, Date.now());
       const failParsed = parseModelString(nextModel);
@@ -1676,6 +1768,7 @@ export {
   EVOLVE_DEFAULTS,
   getEvolveLogPath,
   logModelOutcome,
+  recordModelOutcome,
   analyzeModelPerformance,
   discoverNewModels,
   evolveFallbackChain,
