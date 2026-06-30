@@ -856,6 +856,7 @@ function isRetryableError(error, retryOnErrors) {
     typeof error === 'string' ? error : null,
   ].filter(Boolean).join(' ').toLowerCase();
   if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(errorText)) return true;
+  if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
   return false;
 }
 
@@ -973,6 +974,10 @@ function cleanOmoFallbacks(configDir) {
     stripFallbacks(agentConfig.agents);
     stripFallbacks(agentConfig.categories);
 
+    // Disable omo's runtime-fallback hook by adding to disabled_hooks.
+    // Setting runtime_fallback.enabled=false alone is insufficient — the hook
+    // still registers and races with omf on session.error/session.status events.
+    // Adding "runtime-fallback" to disabled_hooks prevents registration entirely.
     if (agentConfig.runtime_fallback?.enabled !== false) {
       agentConfig.runtime_fallback = {
         ...(agentConfig.runtime_fallback || {}),
@@ -981,9 +986,25 @@ function cleanOmoFallbacks(configDir) {
       modified = true;
     }
 
+    const disabledHooks = agentConfig.disabled_hooks;
+    const needsRuntimeDisabled = !Array.isArray(disabledHooks) ||
+      (!disabledHooks.includes('runtime-fallback') && !disabledHooks.includes('runtime_fallback'));
+    if (needsRuntimeDisabled) {
+      agentConfig.disabled_hooks = Array.isArray(disabledHooks)
+        ? [...disabledHooks, 'runtime-fallback']
+        : ['runtime-fallback'];
+      modified = true;
+    }
+
+    // Also disable model-fallback hook (chat.message layer model switching)
+    if (agentConfig.model_fallback === true) {
+      agentConfig.model_fallback = false;
+      modified = true;
+    }
+
     if (modified) {
       writeFileSync(agentConfigPath, JSON.stringify(agentConfig, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Cleaned oh-my-openagent.json and disabled omo runtime fallback — omf now manages fallback independently`);
+      console.log(`[omf] Cleaned oh-my-openagent.json — disabled runtime-fallback (via disabled_hooks), model_fallback, and fallback_models arrays`);
     }
   } catch (e) {
     console.log(`[omf] Failed to clean oh-my-openagent.json: ${e.message}`);
@@ -1263,7 +1284,8 @@ const plugin = async (input, options) => {
         const error = props.error;
         if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
 
-        getOrCreateSessionState(props.sessionID);
+        console.log(`[omf] ${props.sessionID}: session error (${error.name}) — triggering fallback`);
+        await tryManualFallback(input, props.sessionID);
       }
     },
   };
