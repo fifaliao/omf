@@ -1,114 +1,125 @@
 # omf — Oh My Fallback
 
-OpenCode plugin for unified model fallback management.
+OpenCode plugin for unified model fallback management. Single file, zero dependencies.
+
+## Essentials
+
+- **No build step. No tests. No TypeScript.** Pure ES module (`"type": "module"` in package.json).
+- **No `npm install` ever.** Zero external dependencies — only Node built-ins (`fs`, `path`, `child_process`, `readline`).
+- **Test:** Edit `index.js` → restart OpenCode → check `[omf]` prefixed logs.
+- **Package:** `package.json` has no `scripts` — there is nothing to `npm run`.
 
 ## Project Structure
 
 ```
 omf/
-├── index.js      # Main plugin (ES module, ~512 lines)
-├── install.sh    # Install script (--apply to apply, --configure for interactive setup)
-├── package.json  # Minimal — no build/test scripts
-├── README.md     # Full documentation (EN)
-└── README.zh.md  # Documentation (CN)
-```
-
-**No build step, no tests, no TypeScript.** Pure JavaScript ES module. **No external dependencies** — `npm install` is never needed.
-
-## Developer Workflow
-
-1. Edit `index.js`
-2. Restart OpenCode to test changes
-3. Check `[omf]` prefixed log output for debugging
-
-```
-[omf] Loaded config from /home/user/.config/opencode/omf.json
-[omf] fallback → opencode/big-pickle
+├── index.js       # Everything: plugin, model DB, TUI, command handler, evolution (1778 lines)
+├── install.sh     # Install/config script: --apply, --configure for interactive setup
+├── SKILL.md       # OpenCode skill definition for /omf in-chat commands
+├── package.json   # Minimal — name, version, type:module, main, exports
+├── README.md      # Full docs (CN)
+├── README.zh.md   # Full docs (EN)
+└── AGENTS.md      # This file
 ```
 
 ## Architecture
 
-**Single fallback mode:** `omf` handles fallback for all session types directly. `oh-my-openagent.json` only keeps each agent/category's primary `model`; fallback chains live in `~/.config/opencode/omf.json`, and `omf` performs the abort + retry itself.
+**omf absorbs all fallback responsibility.** On startup, `cleanOmoFallbacks()` strips `fallback_models` from `oh-my-openagent.json` and disables its `runtime_fallback`. Fallback chains live only in `omf.json`; omf performs the abort + retry itself.
 
-**Plugin API contract:** Exports a default async function matching OpenCode's `PluginInput → PluginHooks` signature:
+### Plugin Startup Sequence (index.js:1011-1022)
+
+1. `loadConfig()` — merge user `omf.json` over defaults, write default if missing
+2. `cleanOmoFallbacks()` — strip legacy fallback from `oh-my-openagent.json`, disable its runtime fallback
+3. `autoOptimizeConfig()` — if `auto_optimize: true`, discover models via CLI and rebuild chain
+4. `evolveFallbackChain()` — if `evolve.enabled: true`, reorder chain based on performance data
+
+### Events Handled
+
+| Event | Behavior |
+|---|---|
+| `message.updated` | Error + content detection pipeline → fallback if retryable |
+| `session.status` | Intercept OpenCode's built-in retry loop (429/rate-limit at attempt ≥ 1) → skip to omf fallback instead |
+| `session.error` | Session-level error → delegate to fallback if retryable |
+
+### Fallback Resolution — Two Modes
+
+1. **Weight-based** (`options.weights.enabled: true`): Score all candidate models by success rate (70%) + latency (30%), pick the highest scorer. Uses in-memory `modelStats` cache from `evolve.jsonl`.
+2. **Linked-list walk** (default/legacy): Walk `fallback_chain.links[current]` → skip cooldown models → skip circuit-broken providers → skip unhealthy models → re-prompt with next.
+
+### Plugin API Contract
+
 ```js
-export default async (input, options?: { configDir?: string }) => PluginHooks
+export default async (input, options?) => PluginHooks
+// options.configDir overrides config directory
 ```
 
-**Config:** `~/.config/opencode/omf.json` (created on first load). Pass `configDir` option to override. Path adapts per platform: `%APPDATA%\opencode\` (Windows), `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode` (Linux/macOS).
+## Key Code Sections in index.js
 
-**Agent detection:** Session ID is matched against known agent names via regex. Manual sessions have no agent name in the session ID.
-
-## Key Files
-
-- `index.js:129-133` — known agent names list (up-to-date in code, not docs). **Sorted longest-first** in regex to prevent substring match of short names inside longer ones.
-- `index.js:53-63` — `deepMerge` utility. Hand-rolled, 1 level deep, arrays replaced not merged.
-- `index.js:149-172` — error/status code extraction and retryable error classification
-- `index.js:65-89` — `loadConfig`: merges user config over defaults, writes default if missing
-- `index.js:48-100` — `OMO_MODEL_DB`: built-in model capability database with `classify()`, `rank()`, `optimize()`
-- `index.js:193-256` — `discoverAvailableModels()`: scans oh-my-openagent.json and opencode.json for model strings
-- `index.js:258-297` — `autoOptimizeConfig()`: ranks discovered models by tier (premium>balanced>fast>cheap), updates fallback chain at runtime
-- `install.sh` — `--apply` to apply, `--configure` for interactive model selection. Supports online/piped install: `curl ... | bash -s -- --apply`
-
-## Model Capability Database
-
-`OMO_MODEL_DB` in `index.js` classifies models into 4 tiers:
-
-| Tier | Score | Examples |
+| Section | Lines | What |
 |---|---|---|
-| premium | 100 | big-pickle, gpt-5, claude-sonnet-4, claude-opus |
-| balanced | 80 | claude-sonnet, gpt-4, gpt-4o, gemini-pro, deepseek-v3 |
-| fast | 60 | claude-haiku, gpt-4-mini, gemini-flash, deepseek-chat |
-| cheap | 40 | gpt-3.5, mixtral, llama |
+| `defaultConfig` | 45-90 | Default config values (fallback_models, options, model_tiers, evolve) |
+| `TIER_SCORES` | 94 | `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
+| `OMO_MODEL_DB` | 105-231 | Model capability database: `classify()`, `rank()`, `optimize()` |
+| `deepMerge` | 235-245 | Hand-rolled 1-level deep merge; arrays replaced, not merged |
+| `loadConfig` | 247-270 | Read omf.json, merge over defaults, write default if absent |
+| `discoverProviderApiModels` | 279-300 | **Only method** for model discovery — calls `opencode models` CLI. No file-based discovery. |
+| `buildFallbackChain` | 319-383 | Score + sort models → build linked list. Cycle detection walks 5 steps; if cycle found, falls back to `performance` strategy. |
+| `autoOptimizeConfig` | 385-549 | Auto-rebuild chain on plugin load. Enhanced scoring: tier + success rate + latency + capability match. |
+| `logModelOutcome` / `recordModelOutcome` | 568-631 | Append to `evolve.jsonl` + update in-memory stats cache. Entry format: `{t, m, s, l, e}` (timestamp, model, success 0/1, latency ms, errorCode). |
+| `AGENT_NAMES` | 815-819 | Known agent names for session detection. **Must be kept sorted longest-first** to prevent substring matching (e.g. `sisyphus-junior` before `sisyphus`). |
+| `extractAgentName` | 821-830 | Regex match session ID against AGENT_NAMES. Longest-first sort prevents short names matching inside longer ones. |
+| `isRetryableError` | 845-861 | Status code check + text pattern matching for rate-limit, timeout, network, model-not-found errors. Excludes `ProviderAuthError` and `MessageAbortedError`. |
+| `isAbnormalResponse` | 880-921 | Content detection pipeline: empty → usage_limit → refusal patterns → custom regex. |
+| `cleanOmoFallbacks` | 955-1029 | Strip `fallback_models` from oh-my-openagent.json entries, set `runtime_fallback.enabled=false`, add `"runtime-fallback"` to `disabled_hooks` (prevents hook registration), set `model_fallback=false`. Runs on every plugin load — omf must own all fallback logic. |
+| `plugin()` (entry) | 1011-1272 | Main plugin function. Per-session state tracking (`failedModels`, `failedProviders` maps), cooldown/circuit-breaker logic, `tryManualFallback()`. |
+| `handleCommand` | 1648-1755 | `/omf` command dispatcher. |
 
-Enable auto-optimization by setting `auto_optimize: true` in `omf.json`.
+## Model Tiers
 
-## Common Tasks
+| Tier | Score | Pattern examples |
+|---|---|---|
+| premium | 100 | `opencode/big-pickle`, `axon/gpt-5`, `claude-sonnet-4`, `claude-opus`, `z-ai/glm-5.1` |
+| balanced | 80 | `claude-sonnet` (not `-4`), `gpt-4`, `gpt-4o`, `gemini-pro`, `deepseek-v3`, `deepseek-r1`, `glm-5` |
+| fast | 60 | `claude-haiku`, `gpt-4-mini`, `gemini-flash`, `deepseek-chat`, `deepseek-coder`, `glm-4.*` |
+| cheap | 40 | `gpt-3.5`, `mixtral`, `llama`, `command` |
 
-**Add a new known agent name:** Edit `AGENT_NAMES` array at `index.js:129-133`
+Config tiers in `omf.json.model_tiers` override pattern-based classification. `classifyByCost()` is a secondary fallback using model pricing.
 
-**Add/update model capability tier:** Edit `OMO_MODEL_DB.tiers` patterns in `index.js:48-100`
+## Actual `/omf` Commands
 
-**Run interactive model config:**
-```bash
-./install.sh --configure --apply
-```
+| Command | Action |
+|---|---|
+| `/omf` | Default: launch TUI menu |
+| `/omf status` or `/omf show` | Show chain, options, evolution status |
+| `/omf optimize [strategy]` | Auto-discover models via CLI, build chain with strategy |
+| `/omf chain` or `/omf manual` | Interactive manual chain builder |
+| `/omf options` | Edit max_retries, cooldown, detect, health_check, etc. |
+| `/omf init` or `/omf setup` | Discover all models + agents, propose and apply chain |
+| `/omf evolve on/off/status/reset` | Self-evolution control |
 
-**Run interactive TUI configuration:**
-```bash
-./install.sh --configure --apply
-```
+**Note:** Commands `add`, `remove`, `set`, `retries`, `cooldown`, `auto` listed in some docs do NOT exist in the code. Only the above are implemented.
 
-**Programmatic TUI usage:**
-```js
-import { runTUI } from 'omf';
-await runTUI();
-```
+## Config Location
 
-**omf Skill (in-chat `/omf` commands):**
-Installed automatically by `install.sh --apply`. The skill teaches OpenCode to handle `/omf` commands in the chat by directly editing `omf.json`. Try:
-```
-/omf status      # show current config
-/omf optimize    # auto-discover and rank models
-/omf add axon/deepseek  # add model to chain
-/omf remove 3    # remove model at position 3
-/omf retries 5   # set max_retries
-```
+Platform-adaptive: `%APPDATA%\opencode\omf.json` (Windows), `$XDG_CONFIG_HOME/opencode/omf.json` or `~/.config/opencode/omf.json` (Linux/macOS). Override with `{ configDir: '/custom/path' }` option.
 
-**Change retryable HTTP status codes:** Edit `config.options.retry_on_errors` in `~/.config/opencode/omf.json`
+## Common Editing Points
 
-**Override config directory:** Pass `{ configDir: '/custom/path' }` as second arg to the plugin function
+**Add a known agent name:** `AGENT_NAMES` array at index.js:815-819. Remember: sort longest-first.
 
-**Debug:** Look for `[omf]` prefixed console output in OpenCode logs
+**Add a model tier pattern:** Edit `OMO_MODEL_DB.tiers` at index.js:109-179.
 
-## Installation for Development
+**Change detection behavior:** `isAbnormalResponse()` at index.js:880-921 and `REFUSAL_PATTERNS` at index.js:863-872.
 
-```bash
-./install.sh          # preview (no changes)
-./install.sh --apply  # register plugin + create default config
-```
+**Change retryable errors:** Edit `isRetryableError()` at index.js:845-861 or `defaultConfig.options.retry_on_errors`.
 
-Or manually add to `~/.config/opencode/opencode.json`:
-```json
-{ "plugin": ["file:///path/to/omf"] }
-```
+**Evolution data:** Stored in `evolve.jsonl` (one JSON per line: `{t, m, s, l, e}`). Reset with `/omf evolve reset`.
+
+## Gotchas
+
+- **`deepMerge` is 1-level only.** Nested objects merge recursively, but arrays are replaced entirely, not concatenated.
+- **`opencode models` CLI is the only discovery method.** `discoverProviderApiModels()` shells out to `opencode models` with a 15s timeout. If CLI fails, discovery returns empty — no file-based fallback.
+- **Cycle detection in `buildFallbackChain`** walks 5 steps from each node. If a cycle is found, it **recursively** falls back to `performance` strategy (cannot infinite-loop since performance strategy won't produce cycles).
+- **`cleanOmoFallbacks` runs on every plugin load.** It strips `fallback_models` from oh-my-openagent.json entries, sets `runtime_fallback.enabled=false`, **adds `"runtime-fallback"` to `disabled_hooks`** (prevents omo's hook from registering at all — `enabled=false` alone is insufficient since the hook still races on events), and sets `model_fallback=false`. omf owns all fallback logic.
+- **omo hook vs. omf fallback are mutually exclusive.** omo's runtime-fallback hook must be disabled via `disabled_hooks` (not just `runtime_fallback.enabled=false`) because the hook still registers and races with omf on `session.error`/`session.status` events even when `enabled=false`. Both hooks calling `session.abort()` would conflict.
+- **Session state is in-memory only** (`sessionStates` Map). Restarting OpenCode clears all cooldown/circuit-breaker state.
