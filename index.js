@@ -89,6 +89,62 @@ const defaultConfig = {
   },
 };
 
+/**
+ * Check if omo (oh-my-openagent) is installed in opencode.json.
+ * If not, automatically add it to the plugin list.
+ * Returns: { installed: boolean, message: string }
+ */
+function ensureOmoInstalled() {
+  const configPath = getOpenCodeConfigDir();
+  // opencode.json is at ~/.config/opencode/opencode.json on Linux/macOS,
+  // but on Windows it might be at %APPDATA%\opencode\opencode.json or also at ~/.config/opencode/
+  // Try both locations.
+  const possiblePaths = [
+    join(process.env.HOME || '/root', '.config', 'opencode', 'opencode.json'),
+    join(process.env.APPDATA || '', 'opencode', 'opencode.json'),
+  ];
+
+  let opencodeConfigPath = null;
+  let opencodeConfig = null;
+
+  for (const p of possiblePaths) {
+    if (existsSync(p)) {
+      opencodeConfigPath = p;
+      try {
+        const content = readFileSync(p, 'utf-8');
+        opencodeConfig = JSON.parse(content);
+        break;
+      } catch (e) {
+        opencodeConfigPath = null;
+      }
+    }
+  }
+
+  if (!opencodeConfig || !opencodeConfigPath) {
+    return { installed: false, message: 'opencode.json not found' };
+  }
+
+  const plugins = opencodeConfig.plugin || [];
+  const hasOmo = plugins.some(p =>
+    typeof p === 'string' && (p.includes('oh-my-openagent') || p.includes('omo'))
+  );
+
+  if (hasOmo) {
+    return { installed: true, message: 'omo already installed' };
+  }
+
+  // Add oh-my-openagent@latest to plugin list
+  plugins.push('oh-my-openagent@latest');
+  opencodeConfig.plugin = plugins;
+
+  try {
+    writeFileSync(opencodeConfigPath, JSON.stringify(opencodeConfig, null, 2) + '\n', 'utf-8');
+    return { installed: true, message: `omo added to ${opencodeConfigPath}` };
+  } catch (e) {
+    return { installed: false, message: `Failed to write opencode.json: ${e.message}` };
+  }
+}
+
 // ─── Built-in Model Capability Database ──────────────────────────────────────
 
 const TIER_SCORES = { premium: 100, balanced: 80, fast: 60, cheap: 40 };
@@ -276,9 +332,20 @@ function loadConfig(configDir) {
 // Model discovery is done via discoverProviderApiModels() which calls
 // \`opencode models\` CLI. No file-based discovery is used.
 
-async function discoverProviderApiModels(configDir) {
+async function discoverProviderApiModels(configDir, verbose = false) {
   try {
-    const output = execSync('opencode models', { encoding: 'utf-8', timeout: 15000 });
+    const cmd = verbose ? 'opencode models --verbose' : 'opencode models';
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+    
+    if (verbose) {
+      const models = parseVerboseModelOutput(output);
+      const free = models.filter(m => m.status === 'active' && m.cost?.input === 0 && m.cost?.output === 0).length;
+      const paid = models.filter(m => m.cost && (m.cost.input > 0 || m.cost.output > 0)).length;
+      const inactive = models.filter(m => m.status && m.status !== 'active').length;
+      console.log(`[omf] Discovered ${models.length} models via CLI (${free} free, ${paid} paid, ${inactive} inactive)`);
+      return models;
+    }
+
     const lines = output.trim().split('\n').filter(Boolean);
     
     const models = lines
@@ -297,6 +364,65 @@ async function discoverProviderApiModels(configDir) {
     console.log(`[omf] \`opencode models\` CLI failed: ${e.message}`);
     return [];
   }
+}
+
+function parseVerboseModelOutput(output) {
+  const models = [];
+  const lines = output.trim().split('\n');
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    if (!line) { i++; continue; }
+
+    // Model ID line has format "provider/model-name"
+    if (line.includes('/')) {
+      const modelId = line;
+      i++;
+      const jsonLines = [];
+      let braceCount = 0;
+      let started = false;
+
+      while (i < lines.length) {
+        const jLine = lines[i];
+        if (jLine.includes('{')) started = true;
+        if (started) {
+          braceCount += (jLine.match(/{/g) || []).length;
+          braceCount -= (jLine.match(/}/g) || []).length;
+          jsonLines.push(jLine);
+        }
+        i++;
+        if (started && braceCount === 0) break;
+      }
+
+      try {
+        const jsonStr = jsonLines.join('\n');
+        const data = JSON.parse(jsonStr);
+        models.push({
+          id: modelId,
+          name: data.name || modelId.split('/').pop() || modelId,
+          cost: data.cost || null,
+          status: data.status || 'unknown',
+          providerID: data.providerID || null,
+          source: 'cli',
+        });
+      } catch (e) {
+        // Fallback: add model with minimal info on parse failure
+        models.push({
+          id: modelId,
+          name: modelId.split('/').pop() || modelId,
+          cost: null,
+          status: null,
+          providerID: null,
+          source: 'cli',
+        });
+      }
+    } else {
+      i++;
+    }
+  }
+
+  return models;
 }
 
 // ─── Fallback Chain Builder (linked list) ───────────────────────────────────
@@ -380,6 +506,110 @@ function buildFallbackChain(models, strategy) {
   }
 
   return { chain: sorted, links, head: sorted[0] || null };
+}
+
+/**
+ * Build a deep fallback chain ensuring each model has at least 3 non-repeating
+ * fallback hops before reaching a terminal node.
+ *
+ * @param {string[]} availableModels - All models available via `opencode models` CLI
+ * @param {string[]} omoRequiredModels - Models that omo agents/categories require (must be included)
+ * @param {{ strategy?: string }} [options] - Optional configuration (strategy for future use)
+ * @returns {{ chain: string[], links: {[model]: string|null}, head: string|null }}
+ */
+function buildDeepFallbackChain(availableModels, omoRequiredModels, options = {}) {
+  if (!availableModels || availableModels.length === 0) {
+    return { chain: [], links: {}, head: null };
+  }
+  if (!Array.isArray(omoRequiredModels)) {
+    omoRequiredModels = [];
+  }
+
+  // 1. Build tier info lookup for each available model
+  const modelInfo = new Map();
+  for (const modelId of availableModels) {
+    const tierInfo = OMO_MODEL_DB.classify(modelId) || { tier: 'balanced', score: TIER_SCORES.balanced };
+    modelInfo.set(modelId, tierInfo);
+  }
+
+  // 2. Sort available models by tier score descending for primary ordering
+  const sortedByTier = [...availableModels].sort((a, b) => {
+    const scoreA = modelInfo.get(a)?.score || 0;
+    const scoreB = modelInfo.get(b)?.score || 0;
+    return scoreB - scoreA;
+  });
+  const allModelsSet = new Set(availableModels);
+
+  // 3. First pass: include all omo-required models (deduplicated), warn if missing
+  const chain = [];
+  const seen = new Set();
+
+  for (const modelId of omoRequiredModels) {
+    if (!modelId || typeof modelId !== 'string') continue;
+    if (!allModelsSet.has(modelId)) {
+      console.warn(`[omf] buildDeepFallbackChain: omo-required model "${modelId}" not found in available models, skipping`);
+      continue;
+    }
+    if (!seen.has(modelId)) {
+      chain.push(modelId);
+      seen.add(modelId);
+    }
+  }
+
+  // 4. Second pass: fill remaining chain positions with non-omo models (tier order)
+  for (const modelId of sortedByTier) {
+    if (!seen.has(modelId)) {
+      chain.push(modelId);
+      seen.add(modelId);
+    }
+  }
+
+  // 5. Build links — each model points to the next in chain (forward-only, no cycles)
+  const links = {};
+  for (let i = 0; i < chain.length; i++) {
+    links[chain[i]] = i + 1 < chain.length ? chain[i + 1] : null;
+  }
+
+  // 6. Validate depth constraint: need ≥4 models for 3 fallback hops from head
+  if (chain.length < 4) {
+    console.warn(`[omf] buildDeepFallbackChain: chain length ${chain.length} < 4, depth constraint of 3 fallback hops cannot be satisfied`);
+  }
+
+  // 7. Validate no cycles (walk up to 10 steps from each node)
+  for (const modelId of chain) {
+    let current = links[modelId];
+    for (let step = 0; step < 10; step++) {
+      if (!current) break;
+      if (current === modelId) {
+        console.warn(`[omf] buildDeepFallbackChain: cycle detected at ${modelId}; this should not happen in a forward-only chain`);
+        break;
+      }
+      current = links[current];
+    }
+  }
+
+  return { chain, links, head: chain[0] || null };
+}
+
+/**
+ * Walk from `proposedFallback` following `links` up to `maxHops` steps.
+ * Returns true if `model` is encountered (cycle detected), false otherwise.
+ *
+ * @param {string} model - The original model node to check for
+ * @param {string|null} proposedFallback - The proposed fallback target to start walking from
+ * @param {{[model: string]: string|null}} links - The link map
+ * @param {number} [maxHops=10] - Maximum traversal depth
+ * @returns {boolean} true if a cycle is detected
+ */
+function createsCycle(model, proposedFallback, links, maxHops = 10) {
+  if (!proposedFallback) return false;
+  let current = proposedFallback;
+  for (let step = 0; step < maxHops; step++) {
+    if (!current) return false;
+    if (current === model) return true;
+    current = links[current];
+  }
+  return false;
 }
 
 async function autoOptimizeConfig(configDir, config) {
@@ -846,6 +1076,9 @@ function isRetryableError(error, retryOnErrors) {
   if (!error) return false;
   const statusCode = extractStatusCode(error);
   if (statusCode && retryOnErrors.includes(statusCode)) return true;
+  // Explicit check for CDP/MCP error codes (e.g., -32000 = connection closed)
+  const errorCode = error.code ?? error.data?.code;
+  if (typeof errorCode === 'number' && errorCode < 0 && errorCode >= -33000 && errorCode <= -32000) return true;
   if (error.name === 'ProviderAuthError') return false;
   if (error.name === 'MessageAbortedError') return false;
   const errorText = [
@@ -856,6 +1089,7 @@ function isRetryableError(error, retryOnErrors) {
     typeof error === 'string' ? error : null,
   ].filter(Boolean).join(' ').toLowerCase();
   if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(errorText)) return true;
+  if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
   return false;
 }
 
@@ -952,44 +1186,14 @@ function parseModelString(modelStr) {
 }
 
 function cleanOmoFallbacks(configDir) {
-  const agentConfigPath = join(configDir, 'oh-my-openagent.json');
-  if (!existsSync(agentConfigPath)) return;
+  // omf no longer modifies oh-my-opencode.json.
+  // omf and omo's runtime-fallback hooks coexist — each handles its own scope:
+  //   omo: transport-level errors (session.error, session.status)
+  //   omf: content-level detection (message.updated)
+  //
+  // See the hook handler in plugin() for the full story.
 
-  try {
-    const raw = readFileSync(agentConfigPath, 'utf-8');
-    const agentConfig = JSON.parse(raw);
-    let modified = false;
-
-    const stripFallbacks = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-      for (const [, entry] of Object.entries(obj)) {
-        if (entry && typeof entry === 'object' && 'fallback_models' in entry) {
-          delete entry.fallback_models;
-          modified = true;
-        }
-      }
-    };
-
-    stripFallbacks(agentConfig.agents);
-    stripFallbacks(agentConfig.categories);
-
-    if (agentConfig.runtime_fallback?.enabled !== false) {
-      agentConfig.runtime_fallback = {
-        ...(agentConfig.runtime_fallback || {}),
-        enabled: false,
-      };
-      modified = true;
-    }
-
-    if (modified) {
-      writeFileSync(agentConfigPath, JSON.stringify(agentConfig, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Cleaned oh-my-openagent.json and disabled omo runtime fallback — omf now manages fallback independently`);
-    }
-  } catch (e) {
-    console.log(`[omf] Failed to clean oh-my-openagent.json: ${e.message}`);
-  }
-
-  // Also clean up omf.json: remove legacy per-agent fallback config
+  // Clean up omf.json: remove legacy per-agent fallback config
   const omfConfigPath = join(configDir, 'omf.json');
   if (!existsSync(omfConfigPath)) return;
   try {
@@ -1166,7 +1370,13 @@ const plugin = async (input, options) => {
         return;
       }
 
-      await ctx.client.session.abort({ path: { id: sessionID } });
+      try {
+        await ctx.client.session.abort({ path: { id: sessionID } });
+      } catch (abortErr) {
+        // Session was already aborted — expected in dual-hook env (omo's runtime-fallback).
+        // Continue with retry regardless; abort is only needed to stop a running stream.
+        console.log(`[omf] ${sessionID}: abort coordination (session may already be handled): ${abortErr.message}`);
+      }
 
       const parsed = parseModelString(nextModel);
       await ctx.client.session.promptAsync({
@@ -1247,7 +1457,7 @@ const plugin = async (input, options) => {
         if (status?.type === 'retry' && status.attempt >= 1) {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
-          if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(msg)) {
+          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000/.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting retry (attempt ${status.attempt}) — ${status.message}`);
             const sessState = getOrCreateSessionState(sessionID);
             sessState.pending = false;
@@ -1263,7 +1473,17 @@ const plugin = async (input, options) => {
         const error = props.error;
         if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
 
-        getOrCreateSessionState(props.sessionID);
+        console.log(`[omf] ${props.sessionID}: session error (${error.name}) — queuing fallback (deferred for coordination)`);
+
+        // Defer to end of macrotask queue so omo's runtime-fallback handler runs first.
+        // omo starts its retry → then omf's deferred callback fires, aborts omo's retry,
+        // and starts our own retry with omf's chain model. This ensures omf owns the
+        // fallback decision regardless of handler dispatch order.
+        setTimeout(() => {
+          tryManualFallback(input, props.sessionID).catch(err => {
+            console.log(`[omf] ${props.sessionID}: deferred fallback error:`, err.message);
+          });
+        }, 0);
       }
     },
   };
@@ -1499,6 +1719,55 @@ async function tuiEditOptions(configDir, config) {
   return true;
 }
 
+/**
+ * Extract all model IDs required by omo from oh-my-opencode.json.
+ * Reads agents + categories sections and collects unique model IDs.
+ */
+function getOmoRequiredModels(configDir) {
+  const models = new Set();
+
+  // Try multiple possible locations for oh-my-opencode.json
+  const possiblePaths = [
+    join(process.env.APPDATA || '', 'opencode', 'oh-my-opencode.json'),
+    join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-opencode.json'),
+    join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-openagent.json'),
+  ];
+
+  for (const configPath of possiblePaths) {
+    if (!existsSync(configPath)) continue;
+    try {
+      const content = readFileSync(configPath, 'utf-8');
+      const omoConfig = JSON.parse(content);
+
+      // Collect from agents
+      if (omoConfig.agents) {
+        for (const [name, agent] of Object.entries(omoConfig.agents)) {
+          if (agent.model) models.add(agent.model);
+          if (agent.fallback_models && Array.isArray(agent.fallback_models)) {
+            agent.fallback_models.forEach(m => models.add(m));
+          }
+        }
+      }
+
+      // Collect from categories
+      if (omoConfig.categories) {
+        for (const [name, cat] of Object.entries(omoConfig.categories)) {
+          if (cat.model) models.add(cat.model);
+          if (cat.fallback_models && Array.isArray(cat.fallback_models)) {
+            cat.fallback_models.forEach(m => models.add(m));
+          }
+        }
+      }
+
+      break; // Use first found file
+    } catch (e) {
+      // Skip bad file, try next
+    }
+  }
+
+  return [...models];
+}
+
 // ─── Init: Discover & Configure ─────────────────────────────────────────────
 
 async function tuiInit(configDir, config) {
@@ -1508,85 +1777,140 @@ async function tuiInit(configDir, config) {
     OMO_MODEL_DB._configTiers = config.model_tiers;
   }
 
-  const apiModelObjs = await discoverProviderApiModels(configDir);
-  const apiModelIds = apiModelObjs.map(m => m.id);
-  const allModels = apiModelIds;
+  // ─── Step 1: Auto-install omo ───
+  console.log(`\n[omf] ─── Step 1: Checking omo installation ───`);
+  const omoCheck = ensureOmoInstalled();
+  console.log(`[omf] ${omoCheck.message}`);
+  if (!omoCheck.installed) {
+    console.log(`[omf] WARNING: Could not verify/add omo installation`);
+  }
 
-  console.log(`\n[omf] Models discovered via CLI: ${allModels.length}`);
+  // ─── Step 2: Discover all models via CLI ───
+  console.log(`\n[omf] ─── Step 2: Discovering models via CLI ───`);
+  const apiModelObjs = await discoverProviderApiModels(configDir, true);
+  const allModelIds = apiModelObjs.map(m => m.id);
 
-  if (allModels.length === 0) {
-    console.log(`[omf] No models found. Ensure OpenCode is installed and \`opencode\` is in PATH.`);
+  console.log(`[omf] Models discovered via CLI: ${allModelIds.length}`);
+  if (allModelIds.length === 0) {
+    console.log(`[omf] No models found. Ensure OpenCode is installed and 'opencode' is in PATH.`);
     return false;
   }
 
-  const newTiers = { premium: [], balanced: [], fast: [], cheap: [] };
+  // ─── Step 3: Availability filtering (status + cost) ───
+  console.log(`\n[omf] ─── Step 3: Filtering by availability ───`);
 
-  for (const modelId of allModels) {
-    const apiObj = apiModelObjs.find(m => m.id === modelId);
-    const costTier = classifyByCost(apiObj?.cost);
-    const patternTier = OMO_MODEL_DB.classify(modelId);
-    const tier = costTier || patternTier?.tier || 'balanced';
-    newTiers[tier].push(modelId);
-  }
+  // Filter by CLI-reported status and cost
+  const activeFree = apiModelObjs.filter(m =>
+    m.status === 'active' && (!m.cost || (m.cost.input === 0 && m.cost.output === 0))
+  );
+  const activePaid = apiModelObjs.filter(m =>
+    m.status === 'active' && m.cost && (m.cost.input > 0 || m.cost.output > 0)
+  );
+  const inactiveModels = apiModelObjs.filter(m => m.status && m.status !== 'active');
+  const statusUnknown = apiModelObjs.filter(m => !m.status);
 
-  for (const [tierName, models] of Object.entries(newTiers)) {
-    if (models.length === 0) continue;
-    const score = TIER_SCORES[tierName];
-    console.log(`\n[omf] ${tierName} (score: ${score}) — ${models.length} models:`);
-    models.forEach((m, i) => {
-      const apiObj = apiModelObjs.find(a => a.id === m);
-      const costStr = apiObj?.cost ? ` (in:${apiObj.cost.input}, out:${apiObj.cost.output})` : '';
-      console.log(`[omf] ${i + 1}) ${m}${costStr}`);
+  const nFree = activeFree.length;
+  const nPaid = activePaid.length;
+  const nInactive = inactiveModels.length;
+  const nUnknown = statusUnknown.length;
+
+  console.log(`[omf]   ✓ Free+Active:  ${nFree}`);
+  if (nPaid > 0)    console.log(`[omf]   💰 Paid:         ${nPaid}`);
+  if (nInactive > 0) console.log(`[omf]   ✗ Inactive:     ${nInactive}`);
+  if (nUnknown > 0)  console.log(`[omf]   ? Unknown:      ${nUnknown}`);
+
+  // Free models + unknown-status models are candidates for inclusion
+  // (unknown status might mean not yet probed — include by default)
+  let candidateModels = [...activeFree, ...statusUnknown];
+
+  // For paid models, ask user
+  if (nPaid > 0) {
+    console.log(`\n[omf] Paid models detected (require API billing):`);
+    activePaid.forEach((m, i) => {
+      const costStr = m.cost ? `(in:${m.cost.input}, out:${m.cost.output})` : '';
+      console.log(`[omf]   ${i + 1}) ${m.id} ${costStr}`);
     });
+    const includePaid = await readLine(`[omf] Include paid models? (y/n, default: n): `);
+    if (includePaid.trim().toLowerCase() === 'y' || includePaid.trim().toLowerCase() === 'yes') {
+      candidateModels.push(...activePaid);
+      console.log(`[omf] Paid models included.`);
+    } else {
+      console.log(`[omf] Paid models excluded.`);
+    }
   }
 
-  const agentEntries = discoverAgentEntries(configDir);
-  const agentKeys = Object.keys(agentEntries);
-  console.log(`\n[omf] Current subagent model assignments (from oh-my-openagent.json):`);
-  if (agentKeys.length === 0) {
-    console.log(`[omf] (none found)`);
-  } else {
-    agentKeys.sort().forEach((name) => {
-      const entry = agentEntries[name];
-      const modelLabel = entry.model || '(no primary model)';
-      const typeLabel = entry.type === 'category' ? '[category]' : '[agent]';
-      console.log(`[omf] ${typeLabel} ${name}: ${modelLabel}`);
-    });
+  // Show filtered-out inactive models
+  if (nInactive > 0) {
+    console.log(`\n[omf] Excluded ${nInactive} inactive model(s):`);
+    inactiveModels.forEach(m => console.log(`[omf]   ✗ ${m.id}`));
   }
 
-  OMO_MODEL_DB._configTiers = newTiers;
+  const candidateIds = candidateModels.map(m => m.id);
+  console.log(`[omf] Candidate models after filtering: ${candidateIds.length}/${allModelIds.length}`);
 
+  if (candidateIds.length === 0) {
+    console.log(`[omf] No available models after filtering. Aborting.`);
+    return false;
+  }
+
+  // ─── Step 4: Get omo model requirements ───
+  console.log(`\n[omf] ─── Step 4: Reading omo model requirements ───`);
+  const omoRequiredModels = getOmoRequiredModels(configDir);
+  console.log(`[omf] Models required by omo (from oh-my-opencode.json): ${omoRequiredModels.length}`);
+  omoRequiredModels.forEach(m => console.log(`[omf]   • ${m}`));
+
+  // ─── Step 5: Build deep fallback chain (≥3 fallback hops per model) ───
+  console.log(`\n[omf] ─── Step 5: Building fallback chain ───`);
+
+  OMO_MODEL_DB._configTiers = config.model_tiers || null;
   const strategy = config.fallback_chain?.strategy || 'performance';
-  const { chain: optimizedDefault, links } = buildFallbackChain(allModels, strategy);
-  console.log(`\n[omf] Proposed unified fallback chain (strategy: ${strategy}, ${optimizedDefault.length} models):`);
-  optimizedDefault.forEach((m, i) => {
-    const cls = OMO_MODEL_DB.classify(m);
-    const label = cls ? ` (${cls.name})` : '';
-    console.log(`[omf] ${i + 1}) ${m}${label}`);
+  const { chain, links, head } = buildDeepFallbackChain(candidateIds, omoRequiredModels, { strategy });
+
+  if (chain.length === 0) {
+    console.log(`[omf] No chain could be built. Aborting.`);
+    return false;
+  }
+
+  console.log(`[omf] Chain built (${chain.length} models, strategy: ${strategy}):`);
+  chain.forEach((m, i) => {
+    const tierInfo = OMO_MODEL_DB.classify(m);
+    const next = links[m];
+    const tierLabel = tierInfo ? ` (${tierInfo.tier})` : '';
+    const nextLabel = next ? ` → ${next}` : ' ⏹';
+    console.log(`[omf] ${i + 1}) ${m}${tierLabel}${nextLabel}`);
   });
 
-  console.log(``);
-  const ok = await readLine(`[omf] Apply proposed configuration? (y/n): `);
-  const answer = ok.trim().toLowerCase();
-
-  if (answer === 'y' || answer === 'yes') {
-    config.model_tiers = newTiers;
-    config.fallback_models.default = optimizedDefault;
-    config.fallback_chain = config.fallback_chain || {};
-    config.fallback_chain.strategy = strategy;
-    config.fallback_chain.links = links;
-    config.fallback_chain.head = optimizedDefault[0] || null;
-
-    const configPath = join(configDir, 'omf.json');
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-    console.log(`[omf] Config saved to ${configPath}`);
-    console.log(`[omf] Model tiers written to omf.json.`);
-    console.log(`[omf] Init complete. Restart OpenCode for changes to take effect.`);
-    return true;
+  // Check if all omo-required models are in chain
+  const missingOmo = omoRequiredModels.filter(m => !chain.includes(m));
+  if (missingOmo.length > 0) {
+    console.log(`[omf] WARNING: ${missingOmo.length} omo-required model(s) not in chain:`);
+    missingOmo.forEach(m => console.log(`[omf]   ✗ ${m} (not available or filtered out)`));
   }
 
-  console.log(`[omf] Init cancelled.`);
-  return false;
+  // ─── Step 6: Confirm and write ───
+  console.log(``);
+  const ok = await readLine(`[omf] Apply this configuration? (y/n): `);
+  const answer = ok.trim().toLowerCase();
+
+  if (answer !== 'y' && answer !== 'yes') {
+    console.log(`[omf] Cancelled.`);
+    return false;
+  }
+
+  config.model_tiers = config.model_tiers || {};
+  config.fallback_models = config.fallback_models || {};
+  config.fallback_models.default = chain;
+  config.fallback_models.agents = config.fallback_models.agents || {};
+  config.fallback_chain = config.fallback_chain || {};
+  config.fallback_chain.strategy = strategy;
+  config.fallback_chain.head = head;
+  config.fallback_chain.links = links;
+
+  const configPath = join(configDir, 'omf.json');
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  console.log(`[omf] Config saved to ${configPath}`);
+
+  return true;
 }
 
 function discoverProviderModels(configDir) {
