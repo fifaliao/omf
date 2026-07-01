@@ -1088,7 +1088,7 @@ function isRetryableError(error, retryOnErrors) {
     typeof error.data === 'string' ? error.data : null,
     typeof error === 'string' ? error : null,
   ].filter(Boolean).join(' ').toLowerCase();
-  if (/too many requests|rate limit|retrying in|429|free usage exceeded/.test(errorText)) return true;
+  if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
   return false;
 }
@@ -1107,7 +1107,8 @@ const REFUSAL_PATTERNS = [
 function isUsageLimitResponse(text) {
   return /(rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i.test(text) ||
     /(limit|quota|额度|余额).*(exceeded|reached|失败|不足|耗尽)/i.test(text) ||
-    /insufficient.*(quota|balance|credit|额度|余额)/i.test(text);
+    /insufficient.*(quota|balance|credit|额度|余额)/i.test(text) ||
+    /resourceexhausted|worker.*total.*request.*limit/i.test(text);
 }
 
 function isAbnormalResponse(messageInfo, detectConfig) {
