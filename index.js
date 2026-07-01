@@ -54,7 +54,7 @@ const defaultConfig = {
   options: {
     max_retries: 3,
     cooldown_seconds: 30,
-    retry_on_errors: [429, 500, 502, 503, 504],
+    retry_on_errors: [410, 429, 500, 502, 503, 504],
     notify_on_fallback: true,
     auto_optimize: false,
     detect: {
@@ -1090,6 +1090,7 @@ function isRetryableError(error, retryOnErrors) {
   ].filter(Boolean).join(' ').toLowerCase();
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
+  if (/gone|410.*model|model.*no longer available|end of life|deprecated.*model|model.*deprecated|has reached.*eol/i.test(errorText)) return true;
   return false;
 }
 
@@ -1149,6 +1150,11 @@ function isAbnormalResponse(messageInfo, detectConfig) {
         }
       } catch { /* skip invalid regex */ }
     }
+  }
+
+  // Model EOL / Gone responses (410 Gone: model no longer available)
+  if (/Gone|410.*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol/i.test(text.trim())) {
+    return { reason: 'model_gone', detail: 'model is deprecated or no longer available' };
   }
 
   return null;
