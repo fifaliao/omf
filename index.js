@@ -1084,6 +1084,7 @@ function isRetryableError(error, retryOnErrors) {
   const errorText = [
     error.message,
     error.data?.message,
+    error.data?.detail,
     error.name,
     typeof error.data === 'string' ? error.data : null,
     typeof error === 'string' ? error : null,
