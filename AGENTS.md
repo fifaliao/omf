@@ -65,7 +65,7 @@ This ensures omf's model choice wins regardless of handler dispatch order.
 | **2. Discover models** | `discoverProviderApiModels(verbose=true)` via `opencode models` CLI → gets all models with `status` + `cost` metadata |
 | **3. Filter availability** | Filters by `status === 'active'` + `cost === 0` (free). Inactive/paid filtered. Asks user about paid models. Unknown-status included by default. |
 | **4. Read omo requirements** | `getOmoRequiredModels()` reads `oh-my-opencode.json` agents + categories sections → collects all model IDs omo uses |
-| **5. Build deep chain** | `buildDeepFallbackChain()` builds chain where every model has ≥3 non-repeating fallback hops. omo-required models are prioritized first, remaining slots filled by tier order. Warns if chain length < 4 (can't satisfy depth constraint). |
+| **5. Build deep chain** | `buildDeepFallbackChain()` builds chain: length = omo model count × 3 (minimum 4 for 3-hop depth). Omo-required models prioritized first, remaining slots filled by tier order. |
 | **6. Confirm and write** | User confirms → writes `omf.json` with chain + links + model_tiers |
 
 ### Plugin Startup Sequence (index.js:1098)

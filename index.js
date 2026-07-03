@@ -512,6 +512,8 @@ function buildFallbackChain(models, strategy) {
  * Build a deep fallback chain ensuring each model has at least 3 non-repeating
  * fallback hops before reaching a terminal node.
  *
+ * Chain length = omo required models count × 3 (minimum 4 for 3-hop depth).
+ *
  * @param {string[]} availableModels - All models available via `opencode models` CLI
  * @param {string[]} omoRequiredModels - Models that omo agents/categories require (must be included)
  * @param {{ strategy?: string }} [options] - Optional configuration (strategy for future use)
@@ -556,26 +558,31 @@ function buildDeepFallbackChain(availableModels, omoRequiredModels, options = {}
     }
   }
 
-  // 4. Second pass: fill remaining chain positions with non-omo models (tier order)
+  // 4. Calculate target chain length: omo model count × 3 (minimum 4 for 3-hop depth)
+  const omoModelCount = chain.length;
+  const targetLength = Math.max(4, omoModelCount * 3);
+
+  // 5. Fill remaining chain positions with best-tier models (tier order), up to target
   for (const modelId of sortedByTier) {
+    if (chain.length >= targetLength) break;
     if (!seen.has(modelId)) {
       chain.push(modelId);
       seen.add(modelId);
     }
   }
 
-  // 5. Build links — each model points to the next in chain (forward-only, no cycles)
+  // 6. Build links — each model points to the next in chain (forward-only, no cycles)
   const links = {};
   for (let i = 0; i < chain.length; i++) {
     links[chain[i]] = i + 1 < chain.length ? chain[i + 1] : null;
   }
 
-  // 6. Validate depth constraint: need ≥4 models for 3 fallback hops from head
+  // 7. Validate depth constraint
   if (chain.length < 4) {
     console.warn(`[omf] buildDeepFallbackChain: chain length ${chain.length} < 4, depth constraint of 3 fallback hops cannot be satisfied`);
   }
 
-  // 7. Validate no cycles (walk up to 10 steps from each node)
+  // 8. Validate no cycles (walk up to 10 steps from each node)
   for (const modelId of chain) {
     let current = links[modelId];
     for (let step = 0; step < 10; step++) {
