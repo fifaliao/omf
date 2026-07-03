@@ -335,7 +335,7 @@ function loadConfig(configDir) {
 async function discoverProviderApiModels(configDir, verbose = false) {
   try {
     const cmd = verbose ? 'opencode models --verbose' : 'opencode models';
-    const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 120000 });
     
     if (verbose) {
       const models = parseVerboseModelOutput(output);
@@ -785,9 +785,9 @@ async function autoOptimizeConfig(configDir, config) {
 
 const EVOLVE_DEFAULTS = {
   enabled: true,
-  min_observations: 5,
+  min_observations: 3,
   promote_threshold: 0.7,
-  demote_threshold: 0.3,
+  demote_threshold: 0.5,
   new_model_behavior: 'append',
 };
 
@@ -1038,6 +1038,45 @@ function evolveFallbackChain(configDir, config) {
   }
 
   return false;
+}
+
+/**
+ * Sink a failed model toward the end of the chain.
+ * Swaps the model with the next model in the chain, so it moves one step back.
+ * After repeated failures, it eventually reaches the end.
+ * @param {object} config - omf config
+ * @param {string} modelToSink - model to sink
+ * @param {string} configDir - config directory
+ */
+function sinkModelToEnd(config, modelToSink, configDir) {
+  const models = config.fallback_models.default;
+  const links = config.fallback_chain?.links || {};
+  if (!models || models.length < 2) return;
+
+  const idx = models.indexOf(modelToSink);
+  if (idx === -1 || idx >= models.length - 1) return; // already at end
+
+  // Swap with the next model (move backward one position)
+  const swapIdx = Math.min(idx + 1, models.length - 1);
+  [models[idx], models[swapIdx]] = [models[swapIdx], models[idx]];
+
+  // Rebuild links from the updated chain
+  const newLinks = {};
+  for (let i = 0; i < models.length - 1; i++) {
+    newLinks[models[i]] = models[i + 1];
+  }
+  newLinks[models[models.length - 1]] = null; // terminal
+
+  config.fallback_chain.links = newLinks;
+  config.fallback_chain.head = models[0];
+
+  // Persist immediately
+  const configPath = join(configDir, 'omf.json');
+  try {
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    console.error(`[omf] Failed to save sink config: ${e.message}`);
+  }
 }
 
 // ─── Agent name detection (mirrors oh-my-opencode's logic) ────────────────────
@@ -1397,6 +1436,8 @@ const plugin = async (input, options) => {
       });
 
       recordModelOutcome(configDir, nextModel, true, Date.now() - fallbackStartTime);
+      // Reset consecutive failure counter on success
+      state[`consecutive_${nextModel}`] = 0;
       console.log(`[omf] ${sessionID}: fallback → ${nextModel}`);
 
       if (config.options.notify_on_fallback) {
@@ -1419,6 +1460,18 @@ const plugin = async (input, options) => {
       state.failedModels.set(nextModel, Date.now());
       const failParsed = parseModelString(nextModel);
       if (failParsed) state.failedProviders.set(failParsed.providerID, Date.now());
+
+      // Runtime sinking: track consecutive failures per model
+      const consecutiveKey = `consecutive_${nextModel}`;
+      const prevConsecutive = state[consecutiveKey] || 0;
+      state[consecutiveKey] = prevConsecutive + 1;
+
+      if (prevConsecutive >= 1) {
+        // 2+ consecutive failures → sink this model to the end of the chain
+        sinkModelToEnd(config, nextModel, configDir);
+        console.log(`[omf] ${sessionID}: model ${nextModel} failed ${prevConsecutive + 1}× consecutively — sunk to chain end`);
+      }
+
       state.pending = false;
       return tryManualFallback(ctx, sessionID);
     }
@@ -1921,6 +1974,128 @@ async function tuiInit(configDir, config) {
   return true;
 }
 
+/**
+ * Non-interactive init — auto-executes the full 6-step init flow.
+ * Defaults: exclude paid models, auto-apply config.
+ * @param {string} configDir - omf config directory
+ * @param {object} config - current omf config (merged with defaults)
+ * @returns {Promise<boolean>} true on success
+ */
+async function runInit(configDir, config) {
+  console.log(`\n[omf] ═══ omf Init (non-interactive) ═══`);
+
+  if (config.model_tiers) {
+    OMO_MODEL_DB._configTiers = config.model_tiers;
+  }
+
+  // ─── Step 1: Auto-install omo ───
+  console.log(`\n[omf] ─── Step 1: Checking omo installation ───`);
+  const omoCheck = ensureOmoInstalled();
+  console.log(`[omf] ${omoCheck.message}`);
+  if (!omoCheck.installed) {
+    console.log(`[omf] WARNING: Could not verify/add omo installation`);
+  }
+
+  // ─── Step 2: Discover all models via CLI ───
+  console.log(`\n[omf] ─── Step 2: Discovering models via CLI ───`);
+  const apiModelObjs = await discoverProviderApiModels(configDir, true);
+  const allModelIds = apiModelObjs.map(m => m.id);
+
+  console.log(`[omf] Models discovered via CLI: ${allModelIds.length}`);
+  if (allModelIds.length === 0) {
+    console.log(`[omf] No models found. Ensure OpenCode is installed and 'opencode' is in PATH.`);
+    return false;
+  }
+
+  // ─── Step 3: Filter by availability (exclude paid models by default) ───
+  console.log(`\n[omf] ─── Step 3: Filtering by availability ───`);
+
+  const activeFree = apiModelObjs.filter(m =>
+    m.status === 'active' && (!m.cost || (m.cost.input === 0 && m.cost.output === 0))
+  );
+  const activePaid = apiModelObjs.filter(m =>
+    m.status === 'active' && m.cost && (m.cost.input > 0 || m.cost.output > 0)
+  );
+  const inactiveModels = apiModelObjs.filter(m => m.status && m.status !== 'active');
+  const statusUnknown = apiModelObjs.filter(m => !m.status);
+
+  const nFree = activeFree.length;
+  const nPaid = activePaid.length;
+  const nInactive = inactiveModels.length;
+  const nUnknown = statusUnknown.length;
+
+  console.log(`[omf]   ✓ Free+Active:  ${nFree}`);
+  if (nPaid > 0)    console.log(`[omf]   💰 Paid:         ${nPaid} (excluded by default)`);
+  if (nInactive > 0) console.log(`[omf]   ✗ Inactive:     ${nInactive}`);
+  if (nUnknown > 0)  console.log(`[omf]   ? Unknown:      ${nUnknown}`);
+
+  // Exclude paid models (non-interactive default)
+  let candidateModels = [...activeFree, ...statusUnknown];
+  console.log(`[omf]   → Paid models excluded (non-interactive mode)`);
+
+  if (nInactive > 0) {
+    console.log(`[omf] Excluded ${nInactive} inactive model(s)`);
+  }
+
+  const candidateIds = candidateModels.map(m => m.id);
+  console.log(`[omf] Candidate models after filtering: ${candidateIds.length}/${allModelIds.length}`);
+
+  if (candidateIds.length === 0) {
+    console.log(`[omf] No available models after filtering. Aborting.`);
+    return false;
+  }
+
+  // ─── Step 4: Get omo model requirements ───
+  console.log(`\n[omf] ─── Step 4: Reading omo model requirements ───`);
+  const omoRequiredModels = getOmoRequiredModels(configDir);
+  console.log(`[omf] Models required by omo: ${omoRequiredModels.length}`);
+  omoRequiredModels.forEach(m => console.log(`[omf]   • ${m}`));
+
+  // ─── Step 5: Build deep fallback chain (≥3 fallback hops per model) ───
+  console.log(`\n[omf] ─── Step 5: Building fallback chain ───`);
+
+  OMO_MODEL_DB._configTiers = config.model_tiers || null;
+  const strategy = config.fallback_chain?.strategy || 'performance';
+  const { chain, links, head } = buildDeepFallbackChain(candidateIds, omoRequiredModels, { strategy });
+
+  if (chain.length === 0) {
+    console.log(`[omf] No chain could be built. Aborting.`);
+    return false;
+  }
+
+  console.log(`[omf] Chain built (${chain.length} models, strategy: ${strategy}):`);
+  chain.forEach((m, i) => {
+    const tierInfo = OMO_MODEL_DB.classify(m);
+    const next = links[m];
+    const tierLabel = tierInfo ? ` (${tierInfo.tier})` : '';
+    const nextLabel = next ? ` → ${next}` : ' ⏹';
+    console.log(`[omf] ${i + 1}) ${m}${tierLabel}${nextLabel}`);
+  });
+
+  const missingOmo = omoRequiredModels.filter(m => !chain.includes(m));
+  if (missingOmo.length > 0) {
+    console.log(`[omf] WARNING: ${missingOmo.length} omo-required model(s) not in chain`);
+  }
+
+  // ─── Step 6: Auto-apply (no prompt) ───
+  console.log(`\n[omf] Applying configuration...`);
+
+  config.model_tiers = config.model_tiers || {};
+  config.fallback_models = config.fallback_models || {};
+  config.fallback_models.default = chain;
+  config.fallback_models.agents = config.fallback_models.agents || {};
+  config.fallback_chain = config.fallback_chain || {};
+  config.fallback_chain.strategy = strategy;
+  config.fallback_chain.head = head;
+  config.fallback_chain.links = links;
+
+  const configPath = join(configDir, 'omf.json');
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  console.log(`[omf] Config saved to ${configPath}`);
+
+  return true;
+}
+
 function discoverProviderModels(configDir) {
   const models = new Set();
   const opencodeConfigPath = join(configDir, 'opencode.json');
@@ -2095,6 +2270,7 @@ export {
   showStatus,
   tuiAutoOptimize,
   tuiInit,
+  runInit,
   runTUI,
   handleCommand,
   EVOLVE_DEFAULTS,
