@@ -1131,6 +1131,7 @@ function isRetryableError(error, retryOnErrors) {
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
   if (/gone|410.*model|model.*no longer available|end of life|deprecated.*model|model.*deprecated|has reached.*eol/i.test(errorText)) return true;
+  if (/failed to execute statement|statement failed|execution failed|execute failed/i.test(errorText)) return true;
   return false;
 }
 
