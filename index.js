@@ -1838,6 +1838,75 @@ function getOmoRequiredModels(configDir) {
   return [...models];
 }
 
+/**
+ * Map unavailable omo models to free equivalents from available models.
+ * Returns { updatedConfig, replaced: [{from, to}] }.
+ * @param {string} omoConfigPath - path to oh-my-opencode.json
+ * @param {string[]} availableModelIds - free model IDs from CLI
+ * @returns {{ updatedConfig: object|null, replaced: Array<{from:string, to:string}> }}
+ */
+function updateOmoModels(omoConfigPath, availableModelIds) {
+  if (!existsSync(omoConfigPath)) return { updatedConfig: null, replaced: [] };
+
+  try {
+    const raw = readFileSync(omoConfigPath, 'utf-8');
+    const omoConfig = JSON.parse(raw);
+    const availableSet = new Set(availableModelIds);
+    const replaced = [];
+
+    // Build a simple mapping: strip version suffix to find free equivalent
+    // e.g. axon/claude-opus-4-6 → axon/claude-opus
+    const stripVersion = (modelId) => {
+      const parts = modelId.split('/');
+      if (parts.length !== 2) return modelId;
+      const provider = parts[0];
+      const model = parts[1];
+      // Remove version suffixes: -4-6, -4-5, -4, -5, -3.1, -4-5, etc.
+      const cleaned = model.replace(/-\d+(\.\d+)*(-\w+)?$/, '');
+      return `${provider}/${cleaned}`;
+    };
+
+    // Process agents
+    if (omoConfig.agents) {
+      for (const [name, agent] of Object.entries(omoConfig.agents)) {
+        if (!agent.model) continue;
+        const model = agent.model;
+        if (!availableSet.has(model)) {
+          const freeCandidate = stripVersion(model);
+          if (availableSet.has(freeCandidate)) {
+            agent.model = freeCandidate;
+            replaced.push({ from: model, to: freeCandidate });
+          }
+        }
+      }
+    }
+
+    // Process categories
+    if (omoConfig.categories) {
+      for (const [name, cat] of Object.entries(omoConfig.categories)) {
+        if (!cat.model) continue;
+        const model = cat.model;
+        if (!availableSet.has(model)) {
+          const freeCandidate = stripVersion(model);
+          if (availableSet.has(freeCandidate)) {
+            cat.model = freeCandidate;
+            replaced.push({ from: model, to: freeCandidate });
+          }
+        }
+      }
+    }
+
+    if (replaced.length > 0) {
+      writeFileSync(omoConfigPath, JSON.stringify(omoConfig, null, 2) + '\n', 'utf-8');
+    }
+
+    return { updatedConfig: omoConfig, replaced };
+  } catch (e) {
+    console.log(`[omf] Failed to update omo models: ${e.message}`);
+    return { updatedConfig: null, replaced: [] };
+  }
+}
+
 // ─── Init: Discover & Configure ─────────────────────────────────────────────
 
 async function tuiInit(configDir, config) {
@@ -1984,7 +2053,8 @@ async function tuiInit(configDir, config) {
 }
 
 /**
- * Non-interactive init — auto-executes the full 6-step init flow.
+ * Non-interactive init — auto-executes the full init flow.
+ * Flow: discover → filter → update omo → build chain → write.
  * Defaults: exclude paid models, auto-apply config.
  * @param {string} configDir - omf config directory
  * @param {object} config - current omf config (merged with defaults)
@@ -2047,25 +2117,55 @@ async function runInit(configDir, config) {
   }
 
   const candidateIds = candidateModels.map(m => m.id);
-  console.log(`[omf] Candidate models after filtering: ${candidateIds.length}/${allModelIds.length}`);
+  console.log(`[omf] Available models: ${candidateIds.length}`);
 
   if (candidateIds.length === 0) {
     console.log(`[omf] No available models after filtering. Aborting.`);
     return false;
   }
 
-  // ─── Step 4: Get omo model requirements ───
-  console.log(`\n[omf] ─── Step 4: Reading omo model requirements ───`);
-  const omoRequiredModels = getOmoRequiredModels(configDir);
-  console.log(`[omf] Models required by omo: ${omoRequiredModels.length}`);
-  omoRequiredModels.forEach(m => console.log(`[omf]   • ${m}`));
+  // ─── Step 4: Read omo requirements + update to available models ───
+  console.log(`\n[omf] ─── Step 4: Reading & updating omo model requirements ───`);
+
+  // Find omo config path
+  const omoPossiblePaths = [
+    join(process.env.APPDATA || '', 'opencode', 'oh-my-opencode.json'),
+    join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-opencode.json'),
+    join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-openagent.json'),
+  ];
+  let omoConfigPath = null;
+  for (const p of omoPossiblePaths) {
+    if (existsSync(p)) { omoConfigPath = p; break; }
+  }
+
+  const omoOriginalModels = getOmoRequiredModels(configDir);
+  console.log(`[omf] Current omo models: ${omoOriginalModels.length}`);
+  omoOriginalModels.forEach(m => console.log(`[omf]   • ${m}`));
+
+  // Update omo config: replace unavailable models with free equivalents
+  let replaced = [];
+  if (omoConfigPath) {
+    const result = updateOmoModels(omoConfigPath, candidateIds);
+    replaced = result.replaced;
+    if (replaced.length > 0) {
+      console.log(`\n[omf] Replaced ${replaced.length} unavailable omo model(s) with free equivalents:`);
+      replaced.forEach(r => console.log(`[omf]   ${r.from} → ${r.to}`));
+    } else {
+      console.log(`[omf] All omo models are available — no replacement needed.`);
+    }
+  }
+
+  // Read updated omo models
+  const omoModels = getOmoRequiredModels(configDir);
+  console.log(`\n[omf] Final omo models after update: ${omoModels.length}`);
+  omoModels.forEach(m => console.log(`[omf]   • ${m}`));
 
   // ─── Step 5: Build deep fallback chain (≥3 fallback hops per model) ───
   console.log(`\n[omf] ─── Step 5: Building fallback chain ───`);
 
   OMO_MODEL_DB._configTiers = config.model_tiers || null;
   const strategy = config.fallback_chain?.strategy || 'performance';
-  const { chain, links, head } = buildDeepFallbackChain(candidateIds, omoRequiredModels, { strategy });
+  const { chain, links, head } = buildDeepFallbackChain(candidateIds, omoModels, { strategy });
 
   if (chain.length === 0) {
     console.log(`[omf] No chain could be built. Aborting.`);
@@ -2081,9 +2181,12 @@ async function runInit(configDir, config) {
     console.log(`[omf] ${i + 1}) ${m}${tierLabel}${nextLabel}`);
   });
 
-  const missingOmo = omoRequiredModels.filter(m => !chain.includes(m));
+  // Verify all omo models are in chain
+  const missingOmo = omoModels.filter(m => !chain.includes(m));
   if (missingOmo.length > 0) {
-    console.log(`[omf] WARNING: ${missingOmo.length} omo-required model(s) not in chain`);
+    console.log(`[omf] WARNING: ${missingOmo.length} omo model(s) not in chain`);
+  } else {
+    console.log(`[omf] All ${omoModels.length} omo models are in the chain ✓`);
   }
 
   // ─── Step 6: Auto-apply (no prompt) ───
