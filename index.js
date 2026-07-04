@@ -1840,33 +1840,34 @@ function getOmoRequiredModels(configDir) {
 
 /**
  * Standard mapping of omo agent/category → model.
+ * Source: https://mp.weixin.qq.com/s/Y4EeXPoLPGVsnR8rtEEOcw
  * This is the canonical configuration that defines all models omo uses.
  * Used as the source of truth for building the fallback chain.
  * @type {{ agents: {[name]: string}, categories: {[name]: string} }}
  */
 const STANDARD_OMO_CONFIG = {
   agents: {
-    sisyphus: 'axon/claude-opus',
-    prometheus: 'axon/claude-opus',
-    atlas: 'axon/claude-sonnet',
-    hephaestus: 'opencode/big-pickle',
-    oracle: 'opencode/big-pickle',
-    librarian: 'opencode/mimo-v2.5-free',
-    explore: 'opencode/mimo-v2.5-free',
-    metis: 'axon/claude-opus',
-    momus: 'opencode/big-pickle',
-    'sisyphus-junior': 'axon/claude-sonnet',
-    'multimodal-looker': 'opencode/big-pickle',
+    sisyphus: 'claude-opus-4-6',
+    hephaestus: 'gpt-5.4',
+    prometheus: 'claude-opus-4-6',
+    atlas: 'claude-sonnet-4-6',
+    oracle: 'gpt-5.4',
+    librarian: 'minimax-m2.7',
+    explore: 'grok-code-fast-1',
+    metis: 'claude-opus-4-6',
+    momus: 'gpt-5.4',
+    'sisyphus-junior': 'claude-sonnet-4-6',
+    'multimodal-looker': 'gpt-5.4',
   },
   categories: {
-    'visual-engineering': 'axon/gemini',
-    ultrabrain: 'opencode/big-pickle',
-    deep: 'opencode/big-pickle',
-    artistry: 'axon/gemini',
-    quick: 'opencode/deepseek-v4-flash-free',
-    'unspecified-low': 'axon/claude-sonnet',
-    'unspecified-high': 'opencode/big-pickle',
-    writing: 'axon/gemini',
+    'visual-engineering': 'gemini-3.1-pro',
+    ultrabrain: 'gpt-5.4',
+    deep: 'gpt-5.4',
+    artistry: 'gemini-3.1-pro',
+    quick: 'gpt-5.4-mini',
+    'unspecified-low': 'claude-sonnet-4-6',
+    'unspecified-high': 'claude-opus-4-6',
+    writing: 'gemini-3-flash',
   },
 };
 
@@ -2194,22 +2195,152 @@ async function runInit(configDir, config) {
     if (existsSync(p)) { omoConfigPath = p; break; }
   }
 
-  // Update omo config: replace unavailable models with free equivalents
-  let replaced = [];
-  if (omoConfigPath) {
-    const result = updateOmoModels(omoConfigPath, candidateIds);
-    replaced = result.replaced;
-    if (replaced.length > 0) {
-      console.log(`\n[omf] Replaced ${replaced.length} unavailable model(s) with free equivalents:`);
-      replaced.forEach(r => console.log(`[omf]   ${r.from} → ${r.to}`));
+  // Apply standard config → strip version → replace with free equivalents
+  // Build the replacement map from STANDARD_OMO_CONFIG directly
+  const availableSet = new Set(candidateIds);
+  const replaced = [];
+
+  // Strip version suffix: claude-opus-4-6 → claude-opus (handles both with and without provider)
+  const stripVersion = (modelId) => {
+    const parts = modelId.split('/');
+    if (parts.length === 2) {
+      // Has provider prefix: axon/claude-opus-4-6 → axon/claude-opus
+      return `${parts[0]}/${parts[1].replace(/-\d+(\.\d+)*(-\w+)?$/, '')}`;
     } else {
-      console.log(`[omf] All standard omo models are available — no replacement needed.`);
+      // No provider: claude-opus-4-6 → claude-opus
+      return modelId.replace(/-\d+(\.\d+)*(-\w+)?$/, '');
+    }
+  };
+
+  // Build replacement map from standard config
+  const agentReplacements = {};
+  const categoryReplacements = {};
+
+  // Provider prefix map for models without provider in standard config
+  const PROVIDER_PREFIX_MAP = {
+    'claude-opus-4-6': 'axon',
+    'claude-sonnet-4-6': 'axon',
+    'gpt-5.4': 'axon',
+    'gpt-5.4-mini': 'axon',
+    'minimax-m2.7': 'nvidia/minimaxai',
+    'grok-code-fast-1': 'nvidia/xai',
+    'gemini-3.1-pro': 'nvidia/google',
+    'gemini-3-flash': 'nvidia/google',
+  };
+
+  if (STANDARD_OMO_CONFIG.agents) {
+    for (const [name, model] of Object.entries(STANDARD_OMO_CONFIG.agents)) {
+      if (!availableSet.has(model)) {
+        let freeCandidate = null;
+        
+        // Try stripping version from the model ID
+        const cleaned = stripVersion(model);
+        if (cleaned !== model && availableSet.has(cleaned)) {
+          freeCandidate = cleaned;
+        } else {
+          // No provider prefix — try matching against available models
+          // First, try with known provider prefix
+          const knownPrefix = PROVIDER_PREFIX_MAP[model];
+          if (knownPrefix) {
+            const prefixed = `${knownPrefix}/${model.replace(/-\d+(\.\d+)*(-\w+)?$/, '')}`;
+            if (availableSet.has(prefixed)) {
+              freeCandidate = prefixed;
+            }
+          }
+          
+          // Fallback: search all available models by name
+          if (!freeCandidate) {
+            const cleanedName = model.replace(/-\d+(\.\d+)*(-\w+)?$/, '');
+            for (const avail of candidateIds) {
+              if (avail.endsWith('/' + cleanedName) || avail === cleanedName) {
+                freeCandidate = avail;
+                break;
+              }
+            }
+          }
+        }
+        
+        if (freeCandidate) {
+          agentReplacements[name] = { from: model, to: freeCandidate };
+          replaced.push({ from: model, to: freeCandidate });
+        }
+      }
     }
   }
 
-  // Final omo models = standard models (some may have been replaced in-place)
-  // Re-read from omo config to get the actual current values
-  const omoModels = getStandardOmoModels();
+  if (STANDARD_OMO_CONFIG.categories) {
+    for (const [name, model] of Object.entries(STANDARD_OMO_CONFIG.categories)) {
+      if (!availableSet.has(model)) {
+        let freeCandidate = null;
+        
+        const cleaned = stripVersion(model);
+        if (cleaned !== model && availableSet.has(cleaned)) {
+          freeCandidate = cleaned;
+        } else {
+          const knownPrefix = PROVIDER_PREFIX_MAP[model];
+          if (knownPrefix) {
+            const prefixed = `${knownPrefix}/${model.replace(/-\d+(\.\d+)*(-\w+)?$/, '')}`;
+            if (availableSet.has(prefixed)) {
+              freeCandidate = prefixed;
+            }
+          }
+          
+          if (!freeCandidate) {
+            const cleanedName = model.replace(/-\d+(\.\d+)*(-\w+)?$/, '');
+            for (const avail of candidateIds) {
+              if (avail.endsWith('/' + cleanedName) || avail === cleanedName) {
+                freeCandidate = avail;
+                break;
+              }
+            }
+          }
+        }
+        
+        if (freeCandidate) {
+          categoryReplacements[name] = { from: model, to: freeCandidate };
+          replaced.push({ from: model, to: freeCandidate });
+        }
+      }
+    }
+  }
+
+  // Write replacements back to oh-my-opencode.json
+  if (omoConfigPath && replaced.length > 0) {
+    try {
+      const raw = readFileSync(omoConfigPath, 'utf-8');
+      const omoConfig = JSON.parse(raw);
+
+      if (omoConfig.agents) {
+        for (const [name, repl] of Object.entries(agentReplacements)) {
+          if (omoConfig.agents[name] && omoConfig.agents[name].model) {
+            omoConfig.agents[name].model = repl.to;
+          }
+        }
+      }
+
+      if (omoConfig.categories) {
+        for (const [name, repl] of Object.entries(categoryReplacements)) {
+          if (omoConfig.categories[name] && omoConfig.categories[name].model) {
+            omoConfig.categories[name].model = repl.to;
+          }
+        }
+      }
+
+      writeFileSync(omoConfigPath, JSON.stringify(omoConfig, null, 2) + '\n', 'utf-8');
+    } catch (e) {
+      console.log(`[omf] Failed to write omo config: ${e.message}`);
+    }
+  }
+
+  if (replaced.length > 0) {
+    console.log(`\n[omf] Replaced ${replaced.length} standard model(s) with free equivalents:`);
+    replaced.forEach(r => console.log(`[omf]   ${r.from} → ${r.to}`));
+  } else {
+    console.log(`[omf] All standard omo models are available — no replacement needed.`);
+  }
+
+  // Final omo models = read from oh-my-opencode.json after replacements
+  const omoModels = getOmoRequiredModels(configDir);
   console.log(`\n[omf] Final omo models: ${omoModels.length}`);
   omoModels.forEach(m => console.log(`[omf]   • ${m}`));
 
