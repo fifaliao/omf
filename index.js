@@ -1839,8 +1839,60 @@ function getOmoRequiredModels(configDir) {
 }
 
 /**
+ * Standard mapping of omo agent/category → model.
+ * This is the canonical configuration that defines all models omo uses.
+ * Used as the source of truth for building the fallback chain.
+ * @type {{ agents: {[name]: string}, categories: {[name]: string} }}
+ */
+const STANDARD_OMO_CONFIG = {
+  agents: {
+    sisyphus: 'axon/claude-opus',
+    prometheus: 'axon/claude-opus',
+    atlas: 'axon/claude-sonnet',
+    hephaestus: 'opencode/big-pickle',
+    oracle: 'opencode/big-pickle',
+    librarian: 'opencode/mimo-v2.5-free',
+    explore: 'opencode/mimo-v2.5-free',
+    metis: 'axon/claude-opus',
+    momus: 'opencode/big-pickle',
+    'sisyphus-junior': 'axon/claude-sonnet',
+    'multimodal-looker': 'opencode/big-pickle',
+  },
+  categories: {
+    'visual-engineering': 'axon/gemini',
+    ultrabrain: 'opencode/big-pickle',
+    deep: 'opencode/big-pickle',
+    artistry: 'axon/gemini',
+    quick: 'opencode/deepseek-v4-flash-free',
+    'unspecified-low': 'axon/claude-sonnet',
+    'unspecified-high': 'opencode/big-pickle',
+    writing: 'axon/gemini',
+  },
+};
+
+/**
+ * Extract all unique model IDs from the standard omo config.
+ * @returns {string[]}
+ */
+function getStandardOmoModels() {
+  const models = new Set();
+  if (STANDARD_OMO_CONFIG.agents) {
+    for (const [, model] of Object.entries(STANDARD_OMO_CONFIG.agents)) {
+      if (model) models.add(model);
+    }
+  }
+  if (STANDARD_OMO_CONFIG.categories) {
+    for (const [, model] of Object.entries(STANDARD_OMO_CONFIG.categories)) {
+      if (model) models.add(model);
+    }
+  }
+  return [...models];
+}
+
+/**
  * Map unavailable omo models to free equivalents from available models.
- * Returns { updatedConfig, replaced: [{from, to}] }.
+ * Uses strip-version heuristic to find free equivalent.
+ * Also writes updated config back to oh-my-opencode.json.
  * @param {string} omoConfigPath - path to oh-my-opencode.json
  * @param {string[]} availableModelIds - free model IDs from CLI
  * @returns {{ updatedConfig: object|null, replaced: Array<{from:string, to:string}> }}
@@ -1854,14 +1906,13 @@ function updateOmoModels(omoConfigPath, availableModelIds) {
     const availableSet = new Set(availableModelIds);
     const replaced = [];
 
-    // Build a simple mapping: strip version suffix to find free equivalent
+    // Strip version suffix to find free equivalent
     // e.g. axon/claude-opus-4-6 → axon/claude-opus
     const stripVersion = (modelId) => {
       const parts = modelId.split('/');
       if (parts.length !== 2) return modelId;
       const provider = parts[0];
       const model = parts[1];
-      // Remove version suffixes: -4-6, -4-5, -4, -5, -3.1, -4-5, etc.
       const cleaned = model.replace(/-\d+(\.\d+)*(-\w+)?$/, '');
       return `${provider}/${cleaned}`;
     };
@@ -2124,10 +2175,15 @@ async function runInit(configDir, config) {
     return false;
   }
 
-  // ─── Step 4: Read omo requirements + update to available models ───
-  console.log(`\n[omf] ─── Step 4: Reading & updating omo model requirements ───`);
+  // ─── Step 4: Read standard omo config + update to available models ───
+  console.log(`\n[omf] ─── Step 4: Reading standard omo config & updating models ───`);
 
-  // Find omo config path
+  // Get standard omo models (source of truth for all agents + categories)
+  const standardOmoModels = getStandardOmoModels();
+  console.log(`[omf] Standard omo models: ${standardOmoModels.length}`);
+  standardOmoModels.forEach(m => console.log(`[omf]   • ${m}`));
+
+  // Find omo config path for writing back replacements
   const omoPossiblePaths = [
     join(process.env.APPDATA || '', 'opencode', 'oh-my-opencode.json'),
     join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-opencode.json'),
@@ -2138,26 +2194,23 @@ async function runInit(configDir, config) {
     if (existsSync(p)) { omoConfigPath = p; break; }
   }
 
-  const omoOriginalModels = getOmoRequiredModels(configDir);
-  console.log(`[omf] Current omo models: ${omoOriginalModels.length}`);
-  omoOriginalModels.forEach(m => console.log(`[omf]   • ${m}`));
-
   // Update omo config: replace unavailable models with free equivalents
   let replaced = [];
   if (omoConfigPath) {
     const result = updateOmoModels(omoConfigPath, candidateIds);
     replaced = result.replaced;
     if (replaced.length > 0) {
-      console.log(`\n[omf] Replaced ${replaced.length} unavailable omo model(s) with free equivalents:`);
+      console.log(`\n[omf] Replaced ${replaced.length} unavailable model(s) with free equivalents:`);
       replaced.forEach(r => console.log(`[omf]   ${r.from} → ${r.to}`));
     } else {
-      console.log(`[omf] All omo models are available — no replacement needed.`);
+      console.log(`[omf] All standard omo models are available — no replacement needed.`);
     }
   }
 
-  // Read updated omo models
-  const omoModels = getOmoRequiredModels(configDir);
-  console.log(`\n[omf] Final omo models after update: ${omoModels.length}`);
+  // Final omo models = standard models (some may have been replaced in-place)
+  // Re-read from omo config to get the actual current values
+  const omoModels = getStandardOmoModels();
+  console.log(`\n[omf] Final omo models: ${omoModels.length}`);
   omoModels.forEach(m => console.log(`[omf]   • ${m}`));
 
   // ─── Step 5: Build deep fallback chain (≥3 fallback hops per model) ───
