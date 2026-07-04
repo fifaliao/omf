@@ -167,11 +167,11 @@ const OMO_MODEL_DB = {
       name: 'premium',
       label: 'Best Reasoning/Coding',
       patterns: [
-        /^opencode\/big-pickle$/,
-        /^axon\/gpt-5/,
-        /axon\/claude-sonnet-4/,
-        /axon\/claude-opus/,
-        /nvidia\/z-ai\/glm-5\.1/,
+        /^big-pickle$/,
+        /^gpt-5/,
+        /claude-sonnet-4/,
+        /claude-opus/,
+        /glm-5\.1/,
       ],
       score: 100,
     },
@@ -179,18 +179,18 @@ const OMO_MODEL_DB = {
       name: 'balanced',
       label: 'Balanced Performance',
       patterns: [
-        /^axon\/claude-sonnet(?!-4)/,
-        /^axon\/gpt-4[^.]/,
+        /claude-sonnet(?!-4)/,
+        /gpt-4[^.]/,
         /gpt-4o/,
         /gemini-pro/,
         /deepseek-v3/,
         /deepseek-r1/,
-        /axon\/glm-5\b/,
-        /axon\/gemini\b/,
-        /axon\/deepseek\b/,
-        /nvidia\/z-ai\//,
-        /nvidia\/qwen\/qwen3-[0-9]+b/,
-        /nvidia\/nvidia\/llama-3\.[13]-nemotron-ultra/,
+        /glm-5\b/,
+        /gemini\b/,
+        /deepseek\b/,
+        /z-ai\//,
+        /qwen\/qwen3-[0-9]+b/,
+        /nvidia\/llama-3\.[13]-nemotron-ultra/,
       ],
       score: 80,
     },
@@ -204,17 +204,17 @@ const OMO_MODEL_DB = {
         /gemini-flash/,
         /deepseek-chat/,
         /deepseek-coder/,
-        /axon\/glm-4\./,
-        /axon\/flash\b/,
-        /axon\/kimi\b/,
-        /axon\/qwen\b/,
-        /axon\/MiniMax/,
+        /glm-4\./,
+        /flash\b/,
+        /kimi\b/,
+        /qwen\b/,
+        /MiniMax/,
         /grok-.*fast/,
-        /axon\/coder\b/,
-        /nvidia\/minimaxai\//,
-        /nvidia\/moonshotai\//,
-        /nvidia\/qwen\/qwen3-coder/,
-        /nvidia\/qwen\/qwen3\.5/,
+        /coder\b/,
+        /minimaxai\//,
+        /moonshotai\//,
+        /qwen\/qwen3-coder/,
+        /qwen\/qwen3\.5/,
       ],
       score: 60,
     },
@@ -227,8 +227,8 @@ const OMO_MODEL_DB = {
         /llama/,
         /command/,
         /dbrx/,
-        /axon\/glm-4\.7/,
-        /axon\/grok-4\b/,
+        /glm-4\.7/,
+        /grok-4\b/,
       ],
       score: 40,
     },
@@ -2220,12 +2220,19 @@ async function runInit(configDir, config) {
   const PROVIDER_PREFIX_MAP = {
     'claude-opus-4-6': 'axon',
     'claude-sonnet-4-6': 'axon',
-    'gpt-5.4': 'axon',
-    'gpt-5.4-mini': 'axon',
+    'gpt-5.4': 'opencode',
+    'gpt-5.4-mini': 'opencode',
     'minimax-m2.7': 'nvidia/minimaxai',
     'grok-code-fast-1': 'nvidia/xai',
     'gemini-3.1-pro': 'nvidia/google',
     'gemini-3-flash': 'nvidia/google',
+  };
+
+  // Fallback mapping for models with no direct free equivalent
+  const FALLBACK_MAP = {
+    'gpt-5.4': 'opencode/big-pickle',
+    'grok-code-fast-1': 'opencode/deepseek-v4-flash-free',
+    'gpt-5.4-mini': 'opencode/mimo-v2.5-free',
   };
 
   if (STANDARD_OMO_CONFIG.agents) {
@@ -2245,6 +2252,13 @@ async function runInit(configDir, config) {
             const prefixed = `${knownPrefix}/${model.replace(/-\d+(\.\d+)*(-\w+)?$/, '')}`;
             if (availableSet.has(prefixed)) {
               freeCandidate = prefixed;
+            }
+          }
+          
+          // If no prefix match, try fallback map (for models with no direct equivalent)
+          if (!freeCandidate && FALLBACK_MAP[model]) {
+            if (availableSet.has(FALLBACK_MAP[model])) {
+              freeCandidate = FALLBACK_MAP[model];
             }
           }
           
@@ -2282,6 +2296,12 @@ async function runInit(configDir, config) {
             const prefixed = `${knownPrefix}/${model.replace(/-\d+(\.\d+)*(-\w+)?$/, '')}`;
             if (availableSet.has(prefixed)) {
               freeCandidate = prefixed;
+            }
+          }
+          
+          if (!freeCandidate && FALLBACK_MAP[model]) {
+            if (availableSet.has(FALLBACK_MAP[model])) {
+              freeCandidate = FALLBACK_MAP[model];
             }
           }
           
