@@ -26,6 +26,9 @@ import { execSync } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Plugin context stored at module level so handleCommand/tuiInit/runInit can use it
+let _pluginCtx = null;
+
 // ─── Cross-platform config path resolution ────────────────────────────────────
 
 function getOpenCodeConfigDir() {
@@ -1270,6 +1273,9 @@ function cleanOmoFallbacks(configDir) {
 const plugin = async (input, options) => {
   const configDir = options?.configDir || getOpenCodeConfigDir();
   const config = loadConfig(configDir);
+  
+  // Store ctx for probeAvailableModels and other ctx-dependent operations
+  if (input?.ctx) _pluginCtx = input.ctx;
 
   if (config.model_tiers) {
     OMO_MODEL_DB._configTiers = config.model_tiers;
@@ -1959,6 +1965,97 @@ function updateOmoModels(omoConfigPath, availableModelIds) {
   }
 }
 
+/**
+ * Probe a single model to verify it actually responds.
+ * Sends a minimal "." prompt via session.promptAsync with timeout.
+ * @param {object} modelInfo - { id, providerID, modelID }
+ * @param {object} ctx - plugin context (input.ctx)
+ * @param {number} timeoutMs - timeout in ms (default 15000)
+ * @returns {Promise<{ ok: boolean, modelId: string, error?: string }>}
+ */
+async function probeModel(modelInfo, ctx, timeoutMs = 15000) {
+  const modelId = modelInfo.id;
+  const providerID = modelInfo.providerID || modelId.split('/')[0];
+  const modelID = modelId.split('/').slice(1).join('/');
+  
+  if (!providerID || !modelID) {
+    return { ok: false, modelId, error: 'invalid model ID format' };
+  }
+  
+  const start = Date.now();
+  try {
+    // Race the actual request vs a timeout
+    await Promise.race([
+      ctx.client.session.promptAsync({
+        path: { id: `omf-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+        body: {
+          model: { providerID, modelID },
+          parts: [{ type: 'text', text: '.' }],
+        },
+        query: { directory: ctx.directory },
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+    ]);
+    
+    const elapsed = Date.now() - start;
+    return { ok: true, modelId, latency: elapsed };
+  } catch (e) {
+    const msg = (e.message || '').toLowerCase();
+    // Normalize known failure reasons for cleaner logging
+    if (msg.includes('not found') || msg.includes('404')) {
+      return { ok: false, modelId, error: 'model not found (404)' };
+    }
+    if (msg.includes('timeout')) {
+      return { ok: false, modelId, error: 'request timed out' };
+    }
+    if (msg.includes('auth') || msg.includes('unauthorized') || msg.includes('forbidden')) {
+      return { ok: false, modelId, error: 'auth error' };
+    }
+    if (msg.includes('rate') || msg.includes('too many') || msg.includes('429')) {
+      return { ok: false, modelId, error: 'rate limited (429)' };
+    }
+    return { ok: false, modelId, error: e.message };
+  }
+}
+
+/**
+ * Probe all candidate models and return only those that respond successfully.
+ * @param {object[]} candidateModels - models from CLI with id/providerID/modelID
+ * @param {object} ctx - plugin context
+ * @param {number} timeoutMs - per-model timeout (default 15000ms)
+ * @returns {Promise<object[]>} models that passed the probe
+ */
+async function probeAvailableModels(candidateModels, ctx, timeoutMs = 15000) {
+  const results = [];
+  const failed = [];
+  
+  console.log(`[omf] Probing ${candidateModels.length} candidate models...`);
+  
+  for (let i = 0; i < candidateModels.length; i++) {
+    const model = candidateModels[i];
+    const progress = `${i + 1}/${candidateModels.length}`;
+    process.stdout.write(`\r[omf]   ${progress} — probing ${model.id}...`);
+    
+    const result = await probeModel(model, ctx);
+    
+    if (result.ok) {
+      results.push(model);
+    } else {
+      failed.push({ id: model.id, error: result.error });
+    }
+  }
+  
+  console.log(`\n[omf] Probe complete: ${results.length}/${candidateModels.length} models available`);
+  if (failed.length > 0 && failed.length <= 5) {
+    failed.forEach(f => console.log(`[omf]   ✗ ${f.id}: ${f.error}`));
+  } else if (failed.length > 5) {
+    console.log(`[omf]   ✗ ${failed.length} models failed (showing first 5)`);
+    failed.slice(0, 5).forEach(f => console.log(`[omf]   ✗ ${f.id}: ${f.error}`));
+  }
+  
+  return results;
+}
+
 // ─── Init: Discover & Configure ─────────────────────────────────────────────
 
 async function tuiInit(configDir, config) {
@@ -2036,12 +2133,26 @@ async function tuiInit(configDir, config) {
     inactiveModels.forEach(m => console.log(`[omf]   ✗ ${m.id}`));
   }
 
-  const candidateIds = candidateModels.map(m => m.id);
+  let candidateIds = candidateModels.map(m => m.id);
   console.log(`[omf] Candidate models after filtering: ${candidateIds.length}/${allModelIds.length}`);
 
   if (candidateIds.length === 0) {
     console.log(`[omf] No available models after filtering. Aborting.`);
     return false;
+  }
+
+  // ─── Step 3b: Real API probe to verify models actually respond ───
+  if (_pluginCtx && candidateModels.length > 0) {
+    console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx);
+    if (candidateModels.length === 0) {
+      console.log(`[omf] No models passed the probe. Aborting.`);
+      return false;
+    }
+    // Recalculate candidateIds from probed models
+    candidateIds = candidateModels.map(m => m.id);
+  } else if (!_pluginCtx) {
+    console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
   }
 
   // ─── Step 4: Get omo model requirements ───
@@ -2168,12 +2279,26 @@ async function runInit(configDir, config) {
     console.log(`[omf] Excluded ${nInactive} inactive model(s)`);
   }
 
-  const candidateIds = candidateModels.map(m => m.id);
+  let candidateIds = candidateModels.map(m => m.id);
   console.log(`[omf] Available models: ${candidateIds.length}`);
 
   if (candidateIds.length === 0) {
     console.log(`[omf] No available models after filtering. Aborting.`);
     return false;
+  }
+
+  // ─── Step 3b: Real API probe to verify models actually respond ───
+  if (_pluginCtx && candidateModels.length > 0) {
+    console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx);
+    if (candidateModels.length === 0) {
+      console.log(`[omf] No models passed the probe. Aborting.`);
+      return false;
+    }
+    // Recalculate candidateIds from probed models
+    candidateIds = candidateModels.map(m => m.id);
+  } else if (!_pluginCtx) {
+    console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
   }
 
   // ─── Step 4: Read standard omo config + update to available models ───
