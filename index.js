@@ -1129,7 +1129,10 @@ function isRetryableError(error, retryOnErrors) {
   const errorCode = error.code ?? error.data?.code;
   if (typeof errorCode === 'number' && errorCode < 0 && errorCode >= -33000 && errorCode <= -32000) return true;
   if (error.name === 'ProviderAuthError') return false;
-  if (error.name === 'MessageAbortedError') return false;
+
+  // Build error text early to allow MessageAbortedError content inspection.
+  // OpenCode wraps resource-exhaustion / worker-limit errors as MessageAbortedError,
+  // so we must check for those patterns BEFORE the MessageAbortedError exclusion.
   const errorText = [
     error.message,
     error.data?.message,
@@ -1138,6 +1141,13 @@ function isRetryableError(error, retryOnErrors) {
     typeof error.data === 'string' ? error.data : null,
     typeof error === 'string' ? error : null,
   ].filter(Boolean).join(' ').toLowerCase();
+
+  // Resource exhaustion (worker limit, quota) — checked before MessageAbortedError
+  // so that OpenCode's abort wrapping doesn't silently skip fallback.
+  if (/resourceexhausted|worker.*total.*request.*limit/i.test(errorText)) return true;
+
+  if (error.name === 'MessageAbortedError') return false;
+
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/.test(errorText)) return true;
   if (/gone|410.*model|model.*no longer available|end of life|deprecated.*model|model.*deprecated|has reached.*eol/i.test(errorText)) return true;
@@ -1533,7 +1543,7 @@ const plugin = async (input, options) => {
         if (status?.type === 'retry' && status.attempt >= 1) {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
-          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000/.test(msg)) {
+          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted/.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting retry (attempt ${status.attempt}) — ${status.message}`);
             const sessState = getOrCreateSessionState(sessionID);
             sessState.pending = false;
