@@ -75,7 +75,7 @@ PLUGIN_DIR="${CONFIG_DIR}/plugins/omf"
 if $LOCAL_MODE; then
   REPO_URL="${CUSTOM_REPO:-$(git -C "$OMF_SRC" config --get remote.origin.url 2>/dev/null || true)}"
 fi
-REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"}
+REPO_URL="${REPO_URL:-https://github.com/fifaliao/omf.git}"
 
 # ── Check jq availability ─────────────────────────────────────
 has_jq() {
