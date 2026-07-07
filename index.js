@@ -57,7 +57,7 @@ const defaultConfig = {
   options: {
     max_retries: 3,
     cooldown_seconds: 30,
-    retry_on_errors: [410, 429, 500, 502, 503, 504],
+    retry_on_errors: [404, 410, 429, 500, 502, 503, 504],
     notify_on_fallback: true,
     auto_optimize: false,
     detect: {
@@ -1146,6 +1146,10 @@ function isRetryableError(error, retryOnErrors) {
   // so that OpenCode's abort wrapping doesn't silently skip fallback.
   if (/resourceexhausted|worker.*total.*request.*limit/i.test(errorText)) return true;
 
+  // NotFoundError — OpenCode may wrap model-not-found as MessageAbortedError.
+  // Check before the exclusion so a gone model still triggers fallback.
+  if (/notfounderror|not found/i.test(errorText)) return true;
+
   if (error.name === 'MessageAbortedError') return false;
 
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
@@ -1214,8 +1218,8 @@ function isAbnormalResponse(messageInfo, detectConfig) {
     }
   }
 
-  // Model EOL / Gone responses (410 Gone: model no longer available)
-  if (/Gone|410.*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol/i.test(text.trim())) {
+  // Model EOL / Gone responses (410 Gone, 404 Not Found: model no longer available)
+  if (/gone|410.*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol|not found|404.*model/i.test(text.trim())) {
     return { reason: 'model_gone', detail: 'model is deprecated or no longer available' };
   }
 
