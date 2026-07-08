@@ -21,6 +21,7 @@
 | 📉 模型质量未知 | 自进化追踪实际调用结果，自动重排回退链 |
 | 🎯 手动与 agent 需要不同回退链 | `omf.json` 中按 agent 覆盖，零耦合 |
 | 🧠 "哪个模型该回退给谁？" | 4 种策略——性能、价格、功能匹配、综合 |
+| ⚠️ 模型 NotFound / DEGRADED / EOL | 错误文本模式匹配，自动降级 |
 
 ---
 
@@ -178,17 +179,15 @@ TUI 支持：
 由 `install.sh --apply` 自动安装。omf skill 教导 OpenCode 直接在聊天中编辑配置：
 
 ```
-/omf status                  # 显示当前配置
-/omf optimize [strategy]     # 自动发现 118+ 模型，构建链表
-/omf add axon/deepseek       # 追加模型到链尾
-/omf remove 3                # 删除第 3 个模型
-/omf set 2 axon/gpt-5.4      # 替换第 2 个模型
-/omf retries 5               # 设置 max_retries
-/omf cooldown 30             # 设置 cooldown_seconds
-/omf auto                    # 开关 auto_optimize
-/omf evolve on               # 启用自进化
-/omf evolve status           # 查看模型性能统计
+/omf status / show           # 显示当前配置、回退链、策略
+/omf optimize [strategy]     # 自动发现模型，构建链表（performance/price/feature/comprehensive）
+/omf chain / manual          # 交互式手动配置回退链
+/omf options                 # 编辑选项（max_retries、cooldown、auto_optimize、检测设置）
+/omf init / setup            # 初始化：发现模型 → 探测可用性 → 构建链 → 写入配置
+/omf evolve on/off/status/reset  # 自进化控制
 ```
+
+**注意**：`add`、`remove`、`set`、`retries`、`cooldown`、`auto` 等命令未在代码中实现，请勿使用。
 
 ---
 
@@ -308,7 +307,8 @@ export default async function plugin(
 | 事件 | 行为 |
 |---|---|
 | `message.updated` | 错误/内容检测 → 回退 |
-| `session.error` | 会话级错误（被动，委托给 `message.updated`） |
+| `session.error` | 会话级错误（deferred override：先让 omo 运行，再中止其重试，用 omf 链替换） |
+| `session.status` | 拦截重试循环（429/rate-limit） |
 
 ### 检测流水线
 
@@ -318,7 +318,15 @@ message.updated
     ├── 空响应? ──────────────────────────→ 回退
     ├── 拒绝模式? ────────────────────────→ 回退
     ├── 额度超限? ────────────────────────→ 回退
+    ├── NotFoundError (404)? ─────────────→ 回退
+    ├── DEGRADED function? ───────────────→ 回退
+    ├── Model EOL / Gone (410)? ──────────→ 回退
+    ├── Rate limit / resource exhausted? ─→ 回退
     └── 自定义正则匹配? ──────────────────→ 回退
+
+session.error（transport 层）:
+    ├── 超时 / 网络错误? ─────────────────→ 回退
+    └── ProviderAuthError? ───────────────→ 不回退
 
 回退决议（链表）:
     ├── 通过 links[current] 前进
@@ -331,20 +339,26 @@ message.updated
 
 | 函数 | 描述 |
 |---|---|
-| `runTUI(configDir?)` | 启动交互式 TUI 配置 |
+| `runTUI(configDir?)` | 启动交互式 TUI 配置菜单 |
+| `runInit(configDir, config)` | 非交互式初始化：发现 → 探测 → 构建链 → 写入 |
 | `handleCommand({name, args})` | 处理 `/omf` 命令 |
 | `buildFallbackChain(models, strategy)` | 评分 + 排序 + 构建链表（4 种策略） |
-| `discoverAvailableModels(configDir)` | 从 `opencode models` CLI + 配置文件发现模型 |
-| `discoverProviderApiModels(configDir)` | 通过 `opencode models` CLI 发现模型（唯一方法） |
+| `discoverProviderApiModels(configDir)` | 通过 `opencode models` CLI 发现模型 |
+| `discoverProviderModels(configDir)` | 发现模型（别名） |
 | `discoverAgentEntries(configDir)` | 从 `oh-my-openagent.json` 发现 agent |
-| `tuiInit(configDir, config)` | 交互式初始化：发现并配置所有 agent |
 | `tuiAutoOptimize(configDir, config)` | 带策略选择的自动优化 |
+| `tuiInit(configDir, config)` | 交互式初始化：发现并配置所有 agent |
+| `showStatus(config)` | 显示当前回退链状态 |
 | `OMO_MODEL_DB.classify(modelId)` | 将模型分类到能力层级 |
 | `OMO_MODEL_DB.rank(models)` | 按层级分排序 |
-| `OMO_MODEL_DB.optimize(models, max)` | 构建优化链（旧版，推荐使用 `buildFallbackChain`） |
+| `classifyByCost(modelId)` | 基于模型定价的二级分类 |
 | `logModelOutcome(configDir, model, success, latency, errorCode)` | 记录调用结果到 `evolve.jsonl` |
+| `recordModelOutcome(configDir, model, success, latency, errorCode)` | 更新内存统计缓存 |
 | `analyzeModelPerformance(configDir, minObservations)` | 分析进化数据 |
 | `evolveFallbackChain(configDir, config)` | 运行自进化 |
+| `getEvolveLogPath(configDir)` | 获取进化日志路径 |
+| `TIER_SCORES` | 层级分映射 `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
+| `EVOLVE_DEFAULTS` | 自进化默认配置对象 |
 
 ---
 

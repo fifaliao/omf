@@ -21,6 +21,7 @@ When a model fails (error, empty response, refusal, quota exceeded), `omf` doesn
 | 📉 Unknown model quality | Self-evolution tracks real outcomes and reorders the chain |
 | 🎯 Manual vs agent need different fallback chains | Per-agent overrides in `omf.json`, zero coupling |
 | 🧠 "Which model should fallback to what?" | 4 strategies — performance, price, feature match, comprehensive |
+| ⚠️ Model NotFound / DEGRADED / EOL | Error text pattern matching, automatic downgrade |
 
 ---
 
@@ -181,17 +182,15 @@ TUI supports:
 Installed automatically by `install.sh --apply`. The omf skill teaches OpenCode to edit config directly:
 
 ```
-/omf status                  # show current config
-/omf optimize [strategy]     # auto-discover 118+ models, build linked list
-/omf add axon/deepseek       # append model to chain
-/omf remove 3                # remove model at position 3
-/omf set 2 axon/gpt-5.4      # replace model at position 2
-/omf retries 5               # set max_retries
-/omf cooldown 30             # set cooldown_seconds
-/omf auto                    # toggle auto_optimize
-/omf evolve on               # enable self-evolution
-/omf evolve status           # show model performance stats
+/omf status / show           # Show current config, chain, strategy
+/omf optimize [strategy]     # Auto-discover models, build linked list (performance/price/feature/comprehensive)
+/omf chain / manual          # Interactive manual chain configuration
+/omf options                 # Edit options (max_retries, cooldown, auto_optimize, detection)
+/omf init / setup            # Initialize: discover → probe → build chain → write config
+/omf evolve on/off/status/reset  # Self-evolution control
 ```
+
+**Note:** `add`, `remove`, `set`, `retries`, `cooldown`, `auto` commands are NOT implemented in code. Do not use them.
 
 ---
 
@@ -311,7 +310,8 @@ export default async function plugin(
 | Event | Action |
 |---|---|
 | `message.updated` | Error/content detection → fallback |
-| `session.error` | Session-level error (passive, defers to `message.updated`) |
+| `session.error` | Session-level error (deferred override: lets omo run first, then aborts its retry with omf's chain) |
+| `session.status` | Intercept retry loops (429/rate-limit) |
 
 ### Detection Pipeline
 
@@ -321,7 +321,15 @@ message.updated
     ├── Empty response? ────────────────────→ fallback
     ├── Refusal pattern? ───────────────────→ fallback
     ├── Usage limit? ───────────────────────→ fallback
+    ├── NotFoundError (404)? ───────────────→ fallback
+    ├── DEGRADED function? ─────────────────→ fallback
+    ├── Model EOL / Gone (410)? ────────────→ fallback
+    ├── Rate limit / resource exhausted? ───→ fallback
     └── Custom regex match? ────────────────→ fallback
+
+session.error (transport layer):
+    ├── Timeout / network error? ───────────→ fallback
+    └── ProviderAuthError? ─────────────────→ no fallback
 
 Fallback resolution (linked list):
     ├── Advance via links[current]
@@ -334,20 +342,26 @@ Fallback resolution (linked list):
 
 | Function | Description |
 |---|---|
-| `runTUI(configDir?)` | Launch interactive TUI configuration |
+| `runTUI(configDir?)` | Launch interactive TUI configuration menu |
+| `runInit(configDir, config)` | Non-interactive init: discover → probe → build chain → write |
 | `handleCommand({name, args})` | Handle `/omf` commands |
 | `buildFallbackChain(models, strategy)` | Score + sort + build linked list (4 strategies) |
-| `discoverAvailableModels(configDir)` | Discover models from `opencode models` CLI + configs |
-| `discoverProviderApiModels(configDir)` | Discover models via `opencode models` CLI (sole method) |
+| `discoverProviderApiModels(configDir)` | Discover models via `opencode models` CLI |
+| `discoverProviderModels(configDir)` | Discover models (alias) |
 | `discoverAgentEntries(configDir)` | Discover agents from `oh-my-openagent.json` |
-| `tuiInit(configDir, config)` | Interactive init: discover and configure all agents |
 | `tuiAutoOptimize(configDir, config)` | Auto-optimize with strategy selection |
+| `tuiInit(configDir, config)` | Interactive init: discover and configure all agents |
+| `showStatus(config)` | Show current fallback chain status |
 | `OMO_MODEL_DB.classify(modelId)` | Classify model into capability tier |
 | `OMO_MODEL_DB.rank(models)` | Rank by tier score |
-| `OMO_MODEL_DB.optimize(models, max)` | Build optimized chain (legacy, prefers `buildFallbackChain`) |
+| `classifyByCost(modelId)` | Secondary classification using model pricing |
 | `logModelOutcome(configDir, model, success, latency, errorCode)` | Log outcome to `evolve.jsonl` |
+| `recordModelOutcome(configDir, model, success, latency, errorCode)` | Update in-memory stats cache |
 | `analyzeModelPerformance(configDir, minObservations)` | Analyze evolution data |
 | `evolveFallbackChain(configDir, config)` | Run self-evolution |
+| `getEvolveLogPath(configDir)` | Get evolution log file path |
+| `TIER_SCORES` | Tier score mapping `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
+| `EVOLVE_DEFAULTS` | Self-evolution default config object |
 
 ---
 
