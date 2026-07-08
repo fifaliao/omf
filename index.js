@@ -1150,6 +1150,9 @@ function isRetryableError(error, retryOnErrors) {
   // Check before the exclusion so a gone model still triggers fallback.
   if (/notfounderror|not found/i.test(errorText)) return true;
 
+  // DEGRADED function — model is temporarily unavailable/degraded
+  if (/degraded.*function|function.*degraded|degraded.*cannot/i.test(errorText)) return true;
+
   if (error.name === 'MessageAbortedError') return false;
 
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
@@ -1221,6 +1224,11 @@ function isAbnormalResponse(messageInfo, detectConfig) {
   // Model EOL / Gone responses (410 Gone, 404 Not Found: model no longer available)
   if (/gone|410.*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol|not found|404.*model/i.test(text.trim())) {
     return { reason: 'model_gone', detail: 'model is deprecated or no longer available' };
+  }
+
+  // DEGRADED function — model temporarily unavailable
+  if (/degraded.*function|function.*degraded|degraded.*cannot/i.test(text.trim())) {
+    return { reason: 'degraded', detail: 'model is degraded/unavailable' };
   }
 
   return null;
