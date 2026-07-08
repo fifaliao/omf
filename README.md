@@ -326,7 +326,9 @@ message.updated
 
 session.error（transport 层）:
     ├── 超时 / 网络错误? ─────────────────→ 回退
-    └── ProviderAuthError? ───────────────→ 不回退
+    ├── Socket connection closed unexpectedly? ─→ 回退
+    ├── Cannot connect to API? ─────────────→ 回退
+    └── ProviderAuthError? ─────────────────→ 不回退
 
 回退决议（链表）:
     ├── 通过 links[current] 前进

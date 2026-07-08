@@ -329,7 +329,9 @@ message.updated
 
 session.error (transport layer):
     ├── Timeout / network error? ───────────→ fallback
-    └── ProviderAuthError? ─────────────────→ no fallback
+    ├── Socket connection closed unexpectedly? → fallback
+    ├── Cannot connect to API? ──────────────→ fallback
+    └── ProviderAuthError? ──────────────────→ no fallback
 
 Fallback resolution (linked list):
     ├── Advance via links[current]
