@@ -1562,17 +1562,17 @@ const plugin = async (input, options) => {
       }
 
       // Intercept OpenCode's built-in retry loop (fires for main model 429/rate-limit)
+      // Only intercept the FIRST retry attempt — subsequent ones are handled by omf's own fallback chain
       if (event.type === 'session.status') {
         const props = event.properties;
         if (!props?.sessionID) return;
         const status = props.status;
-        if (status?.type === 'retry' && status.attempt >= 1) {
+        if (status?.type === 'retry' && status.attempt === 1) {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
-          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted/.test(msg)) {
-            console.log(`[omf] ${sessionID}: intercepting retry (attempt ${status.attempt}) — ${status.message}`);
-            const sessState = getOrCreateSessionState(sessionID);
-            sessState.pending = false;
+          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)/i.test(msg)) {
+            console.log(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
+            // Don't reset pending — let tryManualFallback's own pending check handle concurrency
             await tryManualFallback(input, sessionID);
           }
         }
