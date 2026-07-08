@@ -1320,6 +1320,7 @@ const plugin = async (input, options) => {
         failedModels: new Map(),
         failedProviders: new Map(),
         pending: false,
+        exhaustionRounds: 0,
       };
       sessionStates.set(sessionID, state);
     }
@@ -1421,9 +1422,21 @@ const plugin = async (input, options) => {
     }
 
     if (!nextModel) {
-      console.log(`[omf] ${sessionID}: no available fallback models`);
-      sessionStates.delete(sessionID);
-      return;
+      // All models exhausted this round — clear cooldowns and retry from head
+      state.exhaustionRounds = (state.exhaustionRounds || 0) + 1;
+      const maxExhaustionRounds = 3;
+      if (state.exhaustionRounds >= maxExhaustionRounds) {
+        console.log(`[omf] ${sessionID}: exhausted all models for ${maxExhaustionRounds} rounds — giving up`);
+        sessionStates.delete(sessionID);
+        return;
+      }
+      console.log(`[omf] ${sessionID}: all models exhausted — clearing cooldowns, round ${state.exhaustionRounds}/${maxExhaustionRounds}`);
+      state.failedModels.clear();
+      state.failedProviders.clear();
+      state.currentFallbackModel = null;
+      // Reset attemptCount so max_retries doesn't kill the new round prematurely
+      state.attemptCount = 0;
+      return tryManualFallback(ctx, sessionID);
     }
 
     state.pending = true;
