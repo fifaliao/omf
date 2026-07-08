@@ -1153,7 +1153,10 @@ function isRetryableError(error, retryOnErrors) {
   // DEGRADED function — model is temporarily unavailable/degraded
   if (/degraded.*function|function.*degraded|degraded.*cannot/i.test(errorText)) return true;
 
-  if (error.name === 'MessageAbortedError') return false;
+  // NOTE: Do NOT exclude MessageAbortedError here — OpenCode wraps 429/resource-exhaustion
+  // errors as MessageAbortedError, so we must check content patterns BEFORE excluding.
+  // Only exclude if the error name is MessageAbortedError AND none of the retryable
+  // patterns matched above.
 
   if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/i.test(errorText)) return true;
@@ -1161,6 +1164,9 @@ function isRetryableError(error, retryOnErrors) {
   if (/gone|410.*model|model.*no longer available|end of life|deprecated.*model|model.*deprecated|has reached.*eol/i.test(errorText)) return true;
   if (/failed to execute statement|statement failed|execution failed|execute failed/i.test(errorText)) return true;
   if (/not found|404.*openai|openai.*404|providermodelnotfounderror/i.test(errorText)) return true;
+
+  // Now check MessageAbortedError exclusion — only if no retryable pattern matched
+  if (error.name === 'MessageAbortedError') return false;
   return false;
 }
 
