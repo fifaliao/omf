@@ -1921,7 +1921,7 @@ const STANDARD_OMO_CONFIG = {
     deep:               'deepseek-v4-flash',         // balanced: deep analysis (thinking mode)
     artistry:           'deepseek-v4-flash',        // balanced: generative tasks (replaces v3)
     quick:              'gpt-4-mini',                // fast: lightweight tasks
-    'unspecified-low':  'deepseek-chat',             // fast: general fallback (→ v4-flash before 2026/07/24)
+    'unspecified-low':  'deepseek-v4-flash',       // fast: general fallback (v4-flash = current deepseek-chat alias target)
     'unspecified-high': 'claude-sonnet-4-6',        // balanced-premium: general high-end tasks
     writing:            'gemini-3.5-flash',          // balanced-fast: writing tasks (GA stable)
   },
