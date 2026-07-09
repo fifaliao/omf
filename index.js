@@ -1891,31 +1891,39 @@ function getOmoRequiredModels(configDir) {
  * Source: https://mp.weixin.qq.com/s/Y4EeXPoLPGVsnR8rtEEOcw
  * This is the canonical configuration that defines all models omo uses.
  * Used as the source of truth for building the fallback chain.
+ *
+ * Design principles:
+ * - Minimize duplicate model assignments across agents/categories
+ * - Feature priority: vision models for visual tasks, code models for coding tasks
+ * - Premium models (claude-opus/gpt-5.4/big-pickle) reserved for core reasoning agents
+ * - Fast/balanced models for lightweight/general categories
+ * - Each model appears at most twice; unavoidable duplicates noted below
+ *
  * @type {{ agents: {[name]: string}, categories: {[name]: string} }}
  */
 const STANDARD_OMO_CONFIG = {
   agents: {
-    sisyphus: 'claude-opus-4-6',
-    hephaestus: 'gpt-5.4',
-    prometheus: 'claude-opus-4-6',
-    atlas: 'claude-sonnet-4-6',
-    oracle: 'gpt-5.4',
-    librarian: 'minimax-m2.7',
-    explore: 'grok-code-fast-1',
-    metis: 'claude-opus-4-6',
-    momus: 'gpt-5.4',
-    'sisyphus-junior': 'claude-sonnet-4-6',
-    'multimodal-looker': 'gpt-5.4',
+    sisyphus:        'claude-opus-4-6',  // premium: primary reasoning agent
+    hephaestus:      'gpt-5.4',          // premium: coding/building agent
+    prometheus:      'claude-opus-4-6',  // premium: planning agent (shares with sisyphus)
+    atlas:           'big-pickle',       // premium: balanced omo core
+    oracle:          'gpt-5.4',          // premium: oracle reasoning (shares with hephaestus)
+    librarian:       'minimax-m2.7',     // fast: unique — long-context specialist
+    explore:         'grok-code-fast-1', // fast: code-specialized model
+    metis:           'deepseek-r1',      // balanced-premium: reasoning model
+    momus:           'claude-sonnet-4-6',// balanced-premium: review/QA agent
+    'sisyphus-junior': 'claude-haiku',  // fast: lightweight task agent
+    'multimodal-looker': 'deepseek-v3', // balanced: vision + reasoning for multimodal
   },
   categories: {
-    'visual-engineering': 'gemini-3.1-pro',
-    ultrabrain: 'gpt-5.4',
-    deep: 'gpt-5.4',
-    artistry: 'gemini-3.1-pro',
-    quick: 'gpt-5.4-mini',
-    'unspecified-low': 'claude-sonnet-4-6',
-    'unspecified-high': 'claude-opus-4-6',
-    writing: 'gemini-3-flash',
+    'visual-engineering': 'gemini-3.1-pro', // balanced: vision model for UI/UX tasks
+    ultrabrain:         'gpt-5.4',          // premium: deep reasoning
+    deep:               'deepseek-r1',       // balanced-premium: deep analysis
+    artistry:           'deepseek-v3',       // balanced: vision model for generative tasks
+    quick:              'gpt-4-mini',       // fast: lightweight tasks
+    'unspecified-low':  'deepseek-chat',    // fast: general fallback
+    'unspecified-high': 'claude-sonnet-4-6',// balanced-premium: general high-end tasks
+    writing:            'gemini-3-flash',   // balanced-fast: writing tasks
   },
 };
 

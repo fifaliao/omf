@@ -93,7 +93,7 @@ When `session.error` fires:
 | `isAbnormalResponse` | 1167-1213 | Content detection pipeline: empty → usage_limit → refusal patterns → custom regex → model_gone (410) |
 | `cleanOmoFallbacks` | 1247-1269 | Clean legacy per-agent fallback from omf.json only. **Does not touch oh-my-openagent.json** |
 | `plugin()` (entry) | 1273-1566 | Main plugin function. Per-session state tracking (`failedModels`, `failedProviders` maps), cooldown/circuit-breaker, `tryManualFallback()` |
-| `STANDARD_OMO_CONFIG` | 1854-1878 | Canonical mapping of all omo agent/category → model names (used for init chain building) |
+| `STANDARD_OMO_CONFIG` | 1904-1935 | Canonical mapping of all omo agent/category → model names (used by runInit for model replacement). Minimized duplicates: 17 unique models across 19 slots, feature-priority allocation. |
 | `getStandardOmoModels` | 1884-1897 | Returns all unique model IDs from STANDARD_OMO_CONFIG |
 | `getOmoRequiredModels` | 1802-1845 | Reads oh-my-opencode.json / oh-my-openagent.json, collects all model IDs from agents + categories sections |
 | `updateOmoModels` | 1907-1966 | Strip version suffix from omo models to find free equivalents, write back to oh-my-opencode.json |
