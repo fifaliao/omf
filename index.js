@@ -1903,27 +1903,27 @@ function getOmoRequiredModels(configDir) {
  */
 const STANDARD_OMO_CONFIG = {
   agents: {
-    sisyphus:        'claude-opus-4-6',  // premium: primary reasoning agent
-    hephaestus:      'gpt-5.4',          // premium: coding/building agent
-    prometheus:      'claude-opus-4-6',  // premium: planning agent (shares with sisyphus)
-    atlas:           'big-pickle',       // premium: balanced omo core
-    oracle:          'gpt-5.4',          // premium: oracle reasoning (shares with hephaestus)
-    librarian:       'minimax-m2.7',     // fast: unique — long-context specialist
-    explore:         'grok-code-fast-1', // fast: code-specialized model
-    metis:           'deepseek-r1',      // balanced-premium: reasoning model
-    momus:           'claude-sonnet-4-6',// balanced-premium: review/QA agent
-    'sisyphus-junior': 'claude-haiku',  // fast: lightweight task agent
-    'multimodal-looker': 'deepseek-v3', // balanced: vision + reasoning for multimodal
+    sisyphus:          'claude-opus-4-8',        // premium: primary reasoning agent
+    hephaestus:        'gpt-5.4',                 // premium: coding/building agent
+    prometheus:        'claude-opus-4-8',         // premium: planning agent (shares with sisyphus)
+    atlas:             'big-pickle',              // premium: balanced omo core
+    oracle:            'gpt-5.4',                 // premium: oracle reasoning (shares with hephaestus)
+    librarian:         'minimax-m2.7',            // fast: unique — long-context specialist
+    explore:           'grok-4.5',               // premium: xAI flagship, best for code per xAI docs
+    metis:             'deepseek-v4-flash',       // balanced: reasoning via thinking mode (replaces r1)
+    momus:             'claude-sonnet-4-6',       // balanced-premium: review/QA agent
+    'sisyphus-junior': 'claude-haiku-4-5',       // fast: lightweight task agent
+    'multimodal-looker': 'deepseek-v4-pro',      // balanced: vision + reasoning for multimodal
   },
   categories: {
-    'visual-engineering': 'gemini-3.1-pro', // balanced: vision model for UI/UX tasks
-    ultrabrain:         'gpt-5.4',          // premium: deep reasoning
-    deep:               'deepseek-r1',       // balanced-premium: deep analysis
-    artistry:           'deepseek-v3',       // balanced: vision model for generative tasks
-    quick:              'gpt-4-mini',       // fast: lightweight tasks
-    'unspecified-low':  'deepseek-chat',    // fast: general fallback
-    'unspecified-high': 'claude-sonnet-4-6',// balanced-premium: general high-end tasks
-    writing:            'gemini-3-flash',   // balanced-fast: writing tasks
+    'visual-engineering': 'gemini-3.1-pro-preview', // balanced: vision model for UI/UX tasks
+    ultrabrain:         'gpt-5.4',                  // premium: deep reasoning
+    deep:               'deepseek-v4-flash',         // balanced: deep analysis (thinking mode)
+    artistry:           'deepseek-v4-flash',        // balanced: generative tasks (replaces v3)
+    quick:              'gpt-4-mini',                // fast: lightweight tasks
+    'unspecified-low':  'deepseek-chat',             // fast: general fallback (→ v4-flash before 2026/07/24)
+    'unspecified-high': 'claude-sonnet-4-6',        // balanced-premium: general high-end tasks
+    writing:            'gemini-3.5-flash',          // balanced-fast: writing tasks (GA stable)
   },
 };
 
