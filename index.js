@@ -1158,7 +1158,7 @@ function isRetryableError(error, retryOnErrors) {
   // Only exclude if the error name is MessageAbortedError AND none of the retryable
   // patterns matched above.
 
-  if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted/.test(errorText)) return true;
+  if (/too many requests|rate limit|retrying in|429|free usage exceeded|resourceexhausted|500|internal server error|internal error|service unavailable|bad gateway|502|503|504/i.test(errorText)) return true;
   if (/timeout|timed out|etimedout|econnreset|connection reset|connection refused|connect ehostunreach|network error|socket hang|promptservicerequestfailed|providermodelnotfounderror|model not found|modelnotfound|connection closed|-32000/i.test(errorText)) return true;
   if (/cannot connect to api|socket.*connection.*closed.*unexpectedly|socket.*connection.*closed|connection.*closed.*unexpectedly/i.test(errorText)) return true;
   if (/gone|410.*model|model.*no longer available|end of life|deprecated.*model|model.*deprecated|has reached.*eol/i.test(errorText)) return true;
@@ -1577,7 +1577,7 @@ const plugin = async (input, options) => {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
           // prettier-ignore
-          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)|请求过于频繁|频率超限|请求频率|配额不足|额度不足|rate.*limit|limit.*exceed|exhausted/i.test(msg)) {
+          if (/too many requests|rate limit|retrying in|429|500|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)|请求过于频繁|频率超限|请求频率|配额不足|额度不足|rate.*limit|limit.*exceed|exhausted|internal server error|internal error|service unavailable|bad gateway|502|503|504/i.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
             // Don't reset pending — let tryManualFallback's own pending check handle concurrency
             await tryManualFallback(input, sessionID);
