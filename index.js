@@ -1576,10 +1576,13 @@ const plugin = async (input, options) => {
         if (status?.type === 'retry' && status.attempt === 1) {
           const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
-          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)/i.test(msg)) {
+          // prettier-ignore
+          if (/too many requests|rate limit|retrying in|429|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)|请求过于频繁|频率超限|请求频率|配额不足|额度不足|rate.*limit|limit.*exceed|exhausted/i.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
             // Don't reset pending — let tryManualFallback's own pending check handle concurrency
             await tryManualFallback(input, sessionID);
+          } else {
+            console.log(`[omf] ${sessionID}: session.status retry (attempt ${status.attempt}) received but message pattern not matched — ${status.message}`);
           }
         }
       }
