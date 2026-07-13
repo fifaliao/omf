@@ -1238,6 +1238,11 @@ function isAbnormalResponse(messageInfo, detectConfig) {
     return { reason: 'degraded', detail: 'model is degraded/unavailable' };
   }
 
+  // Server error text — catch 5xx / "Internal server error" returned as model response content
+  if (/internal server error|internal error|500|bad gateway|502|503|504/i.test(text.trim())) {
+    return { reason: 'server_error', detail: 'provider returned server error in response content' };
+  }
+
   return null;
 }
 
@@ -1273,15 +1278,88 @@ function parseModelString(modelStr) {
   };
 }
 
-function cleanOmoFallbacks(configDir) {
-  // omf no longer modifies oh-my-opencode.json.
-  // omf and omo's runtime-fallback hooks coexist — each handles its own scope:
-  //   omo: transport-level errors (session.error, session.status)
-  //   omf: content-level detection (message.updated)
-  //
-  // See the hook handler in plugin() for the full story.
+function getOmoConfigPath(configDir) {
+  // Try both possible filenames (oh-my-openagent.json is legacy)
+  const paths = [
+    join(configDir, 'oh-my-opencode.json'),
+    join(configDir, 'oh-my-openagent.json'),
+  ];
+  for (const p of paths) {
+    if (existsSync(p)) return p;
+  }
+  return paths[0]; // default to new name even if it doesn't exist yet
+}
 
-  // Clean up omf.json: remove legacy per-agent fallback config
+/**
+ * Disable omo's runtime-fallback hook so it doesn't compete with omf on
+ * session.error / session.status events.
+ *
+ * omo's hook registration is gated by `disabled_hooks` (not by
+ * `runtime_fallback.enabled`). Simply setting `enabled: false` still lets the
+ * hook receive events; only adding "runtime-fallback" to `disabled_hooks`
+ * prevents the hook from being created.
+ *
+ * CAUTION: omo may rewrite oh-my-opencode.json on startup, reverting our
+ * changes. The caller (plugin()) schedules a delayed re-apply watchdog to
+ * handle this race.
+ */
+function disableOmoHooks(configDir) {
+  const omoPath = getOmoConfigPath(configDir);
+  if (!existsSync(omoPath)) return false;
+  try {
+    const raw = readFileSync(omoPath, 'utf-8');
+    const cfg = JSON.parse(raw);
+    let changed = false;
+
+    // 1. Disable runtime-fallback hook via disabled_hooks (the ONLY effective way)
+    const disabled = new Set(cfg.disabled_hooks || []);
+    if (!disabled.has('runtime-fallback')) {
+      disabled.add('runtime-fallback');
+      cfg.disabled_hooks = [...disabled];
+      changed = true;
+    }
+
+    // 2. Set model_fallback = false (prevents omo's model-layer fallback)
+    if (cfg.model_fallback !== false) {
+      cfg.model_fallback = false;
+      changed = true;
+    }
+
+    // 3. Set runtime_fallback.enabled = false (belt-and-suspenders)
+    if (cfg.runtime_fallback) {
+      const rf = typeof cfg.runtime_fallback === 'object' ? cfg.runtime_fallback : {};
+      if (rf.enabled !== false) {
+        rf.enabled = false;
+        cfg.runtime_fallback = rf;
+        changed = true;
+      }
+    }
+
+    // 4. Strip fallback_models from all agents and categories
+    for (const section of ['agents', 'categories']) {
+      const entries = cfg[section];
+      if (!entries || typeof entries !== 'object') continue;
+      for (const key of Object.keys(entries)) {
+        if (entries[key].fallback_models) {
+          delete entries[key].fallback_models;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      writeFileSync(omoPath, JSON.stringify(cfg, null, 2) + '\n', 'utf-8');
+      console.log(`[omf] Disabled omo hooks in ${omoPath}`);
+      return true;
+    }
+  } catch (e) {
+    console.log(`[omf] Failed to disable omo hooks: ${e.message}`);
+  }
+  return false;
+}
+
+function cleanOmoFallbacks(configDir) {
+  // Only legacy omf.json cleanup remains here
   const omfConfigPath = join(configDir, 'omf.json');
   if (!existsSync(omfConfigPath)) return;
   try {
@@ -1297,6 +1375,31 @@ function cleanOmoFallbacks(configDir) {
   }
 }
 
+// ─── Omo hook watchdog ─────────────────────────────────────────────────────────
+//
+// omo may re-write oh-my-opencode.json on startup, re-enabling its hooks and
+// reverting our disabled_hooks change. We use a short-lived watchdog that
+// re-applies the fix after a delay (enough for omo to finish its init).
+//
+const OMO_WATCHDOG_DELAY = 3000; // ms — wait for omo's startup to settle
+const OMO_WATCHDOG_RETRIES = 3; // max re-apply attempts
+
+function scheduleOmoWatchdog(configDir) {
+  let attempts = 0;
+  const id = setInterval(() => {
+    attempts++;
+    const applied = disableOmoHooks(configDir);
+    if (applied) {
+      console.log(`[omf] Watchdog re-applied omo hook disable (attempt ${attempts})`);
+    }
+    if (attempts >= OMO_WATCHDOG_RETRIES) {
+      clearInterval(id);
+    }
+  }, OMO_WATCHDOG_DELAY);
+  // Ensure the interval doesn't keep the process alive
+  if (typeof id?.unref === 'function') id.unref();
+}
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 const plugin = async (input, options) => {
@@ -1310,6 +1413,12 @@ const plugin = async (input, options) => {
     OMO_MODEL_DB._configTiers = config.model_tiers;
   }
 
+  // Disable omo runtime-fallback hook (prevents event competition)
+  disableOmoHooks(configDir);
+  // Schedule watchdog — omo may re-enable its hooks during startup init
+  scheduleOmoWatchdog(configDir);
+
+  // Legacy cleanup (omf.json per-agent config)
   cleanOmoFallbacks(configDir);
 
   await autoOptimizeConfig(configDir, config);
@@ -1561,6 +1670,17 @@ const plugin = async (input, options) => {
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
             console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
+            await tryManualFallback(input, sessionID);
+            return;
+          }
+        } else {
+          // Error exists but isRetryableError returned false — check response text for
+          // server-error patterns that isRetryableError may have missed due to unusual
+          // error object structure.
+          const parts = info.parts || [];
+          const text = parts.filter(p => p.type === 'text').map(p => p.text || '').join('');
+          if (/internal server error|internal error|500|bad gateway|502|503|504/i.test(text.trim())) {
+            console.log(`[omf] ${sessionID}: server error text detected in response content despite non-retryable error`);
             await tryManualFallback(input, sessionID);
             return;
           }
