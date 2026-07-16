@@ -191,6 +191,46 @@ TUI 支持：
 
 ---
 
+## Init 探测与模型使用追踪
+
+### Init 可用性探测
+
+`/omf init` 或 `/omf setup` 执行完整的初始化流程：
+
+1. **发现** → 通过 `opencode models` CLI 获取所有可用模型
+2. **过滤** → 按状态（active/inactive）和费用（免费/付费）过滤
+3. **探测**（Step 3b）→ **对每个候选模型发送真实 API 请求**，验证是否实际可用
+4. **构建链表** → 仅使用通过探测的模型构建回退链
+
+每个探测结果都会写入 `evolve.jsonl`，作为进化系统的种子数据。探测失败或超时的模型会被自动排除，确保链中不包含不可用的模型。
+
+### 模型使用追踪
+
+omf 会记录用户使用的**所有模型**（包括首次尝试的模型和回退模型）的成功/失败/延迟数据：
+
+| 场景 | 记录内容 | 记录位置 |
+|---|---|---|
+| ✅ 模型正常响应 | 成功 + 延迟 | `evolve.jsonl` |
+| ❌ 模型返回错误/异常 | 失败 + 错误码 | `evolve.jsonl` |
+| 🔄 回退模型调用 | 成功/失败 + 延迟 | `evolve.jsonl` |
+| 🧪 Init 探测 | 可用/不可用 + 延迟 | `evolve.jsonl` |
+
+数据格式（`evolve.jsonl`）：
+```json
+{"t": 1712345678000, "m": "opencode/big-pickle", "s": 1, "l": 1234, "e": null}
+{"t": 1712345679000, "m": "axon/gpt-5.4", "s": 0, "l": 0, "e": "timeout"}
+```
+
+- `t`: 时间戳
+- `m`: 模型 ID
+- `s`: 成功 (1) / 失败 (0)
+- `l`: 延迟（毫秒）
+- `e`: 错误码（成功时 null）
+
+这些数据会被 `evolveFallbackChain()` 和 `autoOptimizeConfig()` 使用，自动将高成功率的模型提升到链顶，将低成功率的模型降级到链底。
+
+---
+
 ## 自进化
 
 默认启用。追踪模型调用结果（成功/失败/延迟），自动调整回退链：
@@ -359,6 +399,9 @@ session.error（transport 层）:
 | `analyzeModelPerformance(configDir, minObservations)` | 分析进化数据 |
 | `evolveFallbackChain(configDir, config)` | 运行自进化 |
 | `getEvolveLogPath(configDir)` | 获取进化日志路径 |
+| `probeModel(modelInfo, ctx, timeoutMs)` | 探测单个模型可用性（发送 "." 并等待 15s） |
+| `probeAvailableModels(candidates, ctx, timeoutMs, configDir)` | 探测所有候选模型；当传入 configDir 时将结果记录到 evolve.jsonl |
+| `getSessionModel(sessionID, state, configDir)` | 从会话 ID 解析当前模型（支持 omo agent 配置查找） |
 | `TIER_SCORES` | 层级分映射 `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
 | `EVOLVE_DEFAULTS` | 自进化默认配置对象 |
 

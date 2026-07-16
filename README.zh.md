@@ -194,6 +194,46 @@ Installed automatically by `install.sh --apply`. The omf skill teaches OpenCode 
 
 ---
 
+## Init Probing & Model Usage Tracking
+
+### Init Availability Probe
+
+`/omf init` or `/omf setup` runs a complete initialization pipeline:
+
+1. **Discover** → fetch all available models via `opencode models` CLI
+2. **Filter** → by status (active/inactive) and cost (free/paid)
+3. **Probe** (Step 3b) → **sends a real API request to each candidate model** to verify availability
+4. **Build chain** → only models that passed the probe are used in the fallback chain
+
+Every probe result is written to `evolve.jsonl`, seeding the evolution system with baseline performance data. Models that time out or fail the probe are automatically excluded from the chain.
+
+### Model Outcome Tracking
+
+omf records **all model usage** (both initial attempts and fallback models) with success/failure/latency data:
+
+| Scenario | Recorded Data | Storage |
+|---|---|---|
+| ✅ Model responds normally | Success + latency | `evolve.jsonl` |
+| ❌ Model returns error/abnormal response | Failure + error code | `evolve.jsonl` |
+| 🔄 Fallback model invocation | Success/failure + latency | `evolve.jsonl` |
+| 🧪 Init probe | Available/unavailable + latency | `evolve.jsonl` |
+
+Data format (`evolve.jsonl`):
+```json
+{"t": 1712345678000, "m": "opencode/big-pickle", "s": 1, "l": 1234, "e": null}
+{"t": 1712345679000, "m": "axon/gpt-5.4", "s": 0, "l": 0, "e": "timeout"}
+```
+
+- `t`: timestamp
+- `m`: model ID
+- `s`: success (1) / failure (0)
+- `l`: latency (ms)
+- `e`: error code (null on success)
+
+This data is consumed by `evolveFallbackChain()` and `autoOptimizeConfig()` to automatically promote high-success-rate models to the chain top and demote low-success-rate models to the bottom.
+
+---
+
 ## Self-Evolution
 
 Enabled by default. Tracks model call outcomes (success/failure/latency) and automatically reorders the chain:
@@ -362,6 +402,9 @@ Fallback resolution (linked list):
 | `analyzeModelPerformance(configDir, minObservations)` | Analyze evolution data |
 | `evolveFallbackChain(configDir, config)` | Run self-evolution |
 | `getEvolveLogPath(configDir)` | Get evolution log file path |
+| `probeModel(modelInfo, ctx, timeoutMs)` | Single model availability probe (sends "." with 15s timeout) |
+| `probeAvailableModels(candidates, ctx, timeoutMs, configDir)` | Probe all candidate models; records results to evolve.jsonl when configDir is provided |
+| `getSessionModel(sessionID, state, configDir)` | Resolve current model from session ID (supports omo agent config lookup) |
 | `TIER_SCORES` | Tier score mapping `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
 | `EVOLVE_DEFAULTS` | Self-evolution default config object |
 

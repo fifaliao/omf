@@ -1108,6 +1108,63 @@ function extractAgentName(sessionID) {
   return null;
 }
 
+/**
+ * Determine the model ID currently used by a session.
+ *
+ * Strategy (in order):
+ * 1. If the session has already entered fallback → return `state.currentFallbackModel`.
+ * 2. Extract the agent name from the session ID and look up its configured model
+ *    from oh-my-opencode.json (or oh-my-openagent.json).
+ * 3. Fall back to STANDARD_OMO_CONFIG so probe results and initial-attempt data
+ *    are still recorded even when the omo config file is absent.
+ *
+ * Returns `null` when no model can be determined (caller should skip recording).
+ *
+ * @param {string} sessionID
+ * @param {object|null} state - Session state map entry (may be null/undefined)
+ * @param {string} configDir - omf config directory
+ * @returns {string|null} resolved model ID
+ */
+function getSessionModel(sessionID, state, configDir) {
+  // 1. Already in fallback → return tracked model
+  if (state?.currentFallbackModel) return state.currentFallbackModel;
+
+  // 2. Agent name → configured model lookup
+  try {
+    const agentName = extractAgentName(sessionID);
+    if (!agentName) return null;
+
+    // Try reading actual omo config first
+    const omoPaths = [
+      join(process.env.APPDATA || '', 'opencode', 'oh-my-opencode.json'),
+      join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-opencode.json'),
+      join(process.env.HOME || '/root', '.config', 'opencode', 'oh-my-openagent.json'),
+    ];
+    for (const p of omoPaths) {
+      if (existsSync(p)) {
+        try {
+          const raw = readFileSync(p, 'utf-8');
+          const cfg = JSON.parse(raw);
+          const model =
+            cfg.agents?.[agentName]?.model ||
+            cfg.categories?.[agentName]?.model;
+          if (model) return model;
+        } catch { /* try next */ }
+      }
+    }
+
+    // 3. Fall back to standard config
+    if (STANDARD_OMO_CONFIG.agents?.[agentName]) {
+      return STANDARD_OMO_CONFIG.agents[agentName];
+    }
+    if (STANDARD_OMO_CONFIG.categories?.[agentName]) {
+      return STANDARD_OMO_CONFIG.categories[agentName];
+    }
+  } catch { /* ignore */ }
+
+  return null;
+}
+
 // ─── Error classification ─────────────────────────────────────────────────────
 
 function extractStatusCode(error) {
@@ -1436,6 +1493,8 @@ const plugin = async (input, options) => {
         failedProviders: new Map(),
         pending: false,
         exhaustionRounds: 0,
+        modelRecorded: false,   // true once we've recorded this session's model outcome
+        originalModel: null,    // cached first-attempt model ID
       };
       sessionStates.set(sessionID, state);
     }
@@ -1649,6 +1708,28 @@ const plugin = async (input, options) => {
     event: async ({ event }) => {
       if (!config.options.retry_on_errors?.length) return;
 
+      /**
+       * Record the current session's model outcome — fires ONLY once per session
+       * (guarded by state.modelRecorded) so the original model's success/failure
+       * is always captured regardless of how many fallback rounds happen.
+       *
+       * For sessions already in fallback, the outcome is already recorded inside
+       * tryManualFallback — this guard prevents double-counting.
+       *
+       * @param {string} sid - session ID
+       * @param {boolean} success - whether the model responded successfully
+       * @param {string|null} errorCode - optional error code for failures
+       */
+      const recordSessionModel = (sid, success, errorCode) => {
+        const state = getOrCreateSessionState(sid);
+        if (state.modelRecorded) return;
+        const model = getSessionModel(sid, state, configDir);
+        if (model) {
+          recordModelOutcome(configDir, model, success, 0, errorCode);
+          state.modelRecorded = true;
+        }
+      };
+
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         if (!info || info.role !== 'assistant') return;
@@ -1660,6 +1741,7 @@ const plugin = async (input, options) => {
         const error = info.error;
         if (error && isRetryableError(error, config.options.retry_on_errors)) {
           console.log(`[omf] ${sessionID}: retryable error detected (${error.name})`);
+          recordSessionModel(sessionID, false, error.name);
           await tryManualFallback(input, sessionID);
           return;
         }
@@ -1670,6 +1752,7 @@ const plugin = async (input, options) => {
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
             console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
+            recordSessionModel(sessionID, false, abnormal.reason);
             await tryManualFallback(input, sessionID);
             return;
           }
@@ -1681,10 +1764,15 @@ const plugin = async (input, options) => {
           const text = parts.filter(p => p.type === 'text').map(p => p.text || '').join('');
           if (/internal server error|internal error|500|bad gateway|502|503|504/i.test(text.trim())) {
             console.log(`[omf] ${sessionID}: server error text detected in response content despite non-retryable error`);
+            recordSessionModel(sessionID, false, 'server_error_text');
             await tryManualFallback(input, sessionID);
             return;
           }
         }
+
+        // 3. Normal response — no error, no abnormal content detected.
+        // Record the model as successful so evolve/optimization knows it works.
+        recordSessionModel(sessionID, true, null);
       }
 
       // Intercept OpenCode's built-in retry loop (fires for main model 429/rate-limit)
@@ -1692,13 +1780,14 @@ const plugin = async (input, options) => {
       if (event.type === 'session.status') {
         const props = event.properties;
         if (!props?.sessionID) return;
+        const sessionID = props.sessionID;
         const status = props.status;
         if (status?.type === 'retry' && status.attempt === 1) {
-          const sessionID = props.sessionID;
           const msg = (status.message || '').toLowerCase();
           // prettier-ignore
           if (/too many requests|rate limit|retrying in|429|500|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)|请求过于频繁|频率超限|请求频率|配额不足|额度不足|rate.*limit|limit.*exceed|exhausted|internal server error|internal error|service unavailable|bad gateway|502|503|504/i.test(msg)) {
             console.log(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
+            recordSessionModel(sessionID, false, status.type);
             // Don't reset pending — let tryManualFallback's own pending check handle concurrency
             await tryManualFallback(input, sessionID);
           } else {
@@ -1710,19 +1799,20 @@ const plugin = async (input, options) => {
       if (event.type === 'session.error') {
         const props = event.properties;
         if (!props?.sessionID) return;
-
+        const sessionID = props.sessionID;
         const error = props.error;
         if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
 
-        console.log(`[omf] ${props.sessionID}: session error (${error.name}) — queuing fallback (deferred for coordination)`);
+        console.log(`[omf] ${sessionID}: session error (${error.name}) — queuing fallback (deferred for coordination)`);
+        recordSessionModel(sessionID, false, error.name);
 
         // Defer to end of macrotask queue so omo's runtime-fallback handler runs first.
         // omo starts its retry → then omf's deferred callback fires, aborts omo's retry,
         // and starts our own retry with omf's chain model. This ensures omf owns the
         // fallback decision regardless of handler dispatch order.
         setTimeout(() => {
-          tryManualFallback(input, props.sessionID).catch(err => {
-            console.log(`[omf] ${props.sessionID}: deferred fallback error:`, err.message);
+          tryManualFallback(input, sessionID).catch(err => {
+            console.log(`[omf] ${sessionID}: deferred fallback error:`, err.message);
           });
         }, 0);
       }
@@ -2193,12 +2283,15 @@ async function probeModel(modelInfo, ctx, timeoutMs = 15000) {
 
 /**
  * Probe all candidate models and return only those that respond successfully.
+ * When configDir is provided, probe results are also recorded to evolve.jsonl
+ * as real-world performance data for chain optimization.
  * @param {object[]} candidateModels - models from CLI with id/providerID/modelID
  * @param {object} ctx - plugin context
  * @param {number} timeoutMs - per-model timeout (default 15000ms)
+ * @param {string|null} configDir - omf config dir (pass to persist probe results)
  * @returns {Promise<object[]>} models that passed the probe
  */
-async function probeAvailableModels(candidateModels, ctx, timeoutMs = 15000) {
+async function probeAvailableModels(candidateModels, ctx, timeoutMs = 15000, configDir = null) {
   const results = [];
   const failed = [];
   
@@ -2210,6 +2303,12 @@ async function probeAvailableModels(candidateModels, ctx, timeoutMs = 15000) {
     process.stdout.write(`\r[omf]   ${progress} — probing ${model.id}...`);
     
     const result = await probeModel(model, ctx);
+
+    // Record probe result as evolve data so it seeds the performance statistics
+    // used by evolveFallbackChain() and autoOptimizeConfig().
+    if (configDir) {
+      recordModelOutcome(configDir, model.id, result.ok, result.latency || 0, result.error);
+    }
     
     if (result.ok) {
       results.push(model);
@@ -2315,9 +2414,11 @@ async function tuiInit(configDir, config) {
   }
 
   // ─── Step 3b: Real API probe to verify models actually respond ───
+  // Each probe result is recorded to evolve.jsonl so it seeds the performance
+  // statistics used by evolveFallbackChain() and autoOptimizeConfig().
   if (_pluginCtx && candidateModels.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 15000, configDir);
     if (candidateModels.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
@@ -2326,6 +2427,8 @@ async function tuiInit(configDir, config) {
     candidateIds = candidateModels.map(m => m.id);
   } else if (!_pluginCtx) {
     console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
+    console.log(`[omf] WARNING: Without probing, the chain may include non-working models.`);
+    console.log(`[omf] Run /omf init again from within OpenCode to enable availability verification.`);
   }
 
   // ─── Step 4: Get omo model requirements ───
@@ -2461,9 +2564,11 @@ async function runInit(configDir, config) {
   }
 
   // ─── Step 3b: Real API probe to verify models actually respond ───
+  // Each probe result is recorded to evolve.jsonl so it seeds the performance
+  // statistics used by evolveFallbackChain() and autoOptimizeConfig().
   if (_pluginCtx && candidateModels.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 15000, configDir);
     if (candidateModels.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
@@ -2472,6 +2577,8 @@ async function runInit(configDir, config) {
     candidateIds = candidateModels.map(m => m.id);
   } else if (!_pluginCtx) {
     console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
+    console.log(`[omf] WARNING: Without probing, the chain may include non-working models.`);
+    console.log(`[omf] Run /omf init again from within OpenCode to enable availability verification.`);
   }
 
   // ─── Step 4: Read standard omo config + update to available models ───
@@ -2894,5 +3001,8 @@ export {
   analyzeModelPerformance,
   discoverNewModels,
   evolveFallbackChain,
+  probeModel,
+  probeAvailableModels,
+  getSessionModel,
 };
 export default plugin;

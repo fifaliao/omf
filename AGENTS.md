@@ -85,6 +85,9 @@ When `session.error` fires:
 | `scoreModelWithWeights` | 873-892 | Score model: 70% success rate + 30% latency (inverse), neutral score (50) if insufficient data |
 | `analyzeModelPerformance` | 894-934 | Read evolve.jsonl, return sorted array of `{model, successRate, avgLatency, totalCalls}` |
 | `evolveFallbackChain` | 982-1051 | Promote ≥70% success rate models, demote ≤50% failure rate models, auto-discover new models |
+| `getSessionModel` | 1128-1165 | Extract model ID from session: checks `state.currentFallbackModel` → omo config → STANDARD_OMO_CONFIG |
+| `probeModel` | 2149-2281 | Single model probe via `session.promptAsync('.')` with 15s timeout. Returns `{ok, modelId, latency, error}` |
+| `probeAvailableModels` | 2284-2329 | Probe all candidate models; records each result to evolve.jsonl when configDir is provided |
 | `sinkModelToEnd` | 1061-1090 | Swap failed model with next in chain (moves back one position per failure), persists to omf.json immediately |
 | `AGENT_NAMES` | 1094-1098 | Known agent names. **Must be sorted longest-first** (e.g. `sisyphus-junior` before `sisyphus`) |
 | `extractAgentName` | 1100-1109 | Regex match session ID against AGENT_NAMES (longest-first sort prevents substring matching) |
