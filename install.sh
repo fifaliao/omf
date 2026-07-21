@@ -795,6 +795,23 @@ else
   echo "  [SKIP]    SKILL.md not found at ${SKILL_SRC}"
 fi
 
+# ── 5. Apply oh-my-openagent polling interval patches ────────────
+PATCH_SCRIPT="${OMF_SRC}/patch-omo.js"
+if [ -f "$PATCH_SCRIPT" ]; then
+  echo "  [PATCH]   oh-my-openagent polling interval optimization..."
+  if $APPLY; then
+    if command -v node &>/dev/null; then
+      node "$PATCH_SCRIPT" 2>&1 || echo "  [WARN]    patch-omo.js exited with non-zero status"
+    else
+      echo "  [SKIP]    node not found — cannot run patch-omo.js"
+    fi
+  else
+    echo "  [DRY-RUN] Would apply polling interval patches"
+  fi
+else
+  echo "  [SKIP]    ${PATCH_SCRIPT} not found"
+fi
+
 echo ""
 if $APPLY; then
   echo "== Install complete. Restart OpenCode for changes to take effect. =="

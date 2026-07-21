@@ -18,7 +18,7 @@
  *     %APPDATA%/opencode/ on Windows, ~/.config/opencode/ on Linux/macOS)
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, copyFileSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createInterface } from 'readline';
@@ -1463,6 +1463,20 @@ const plugin = async (input, options) => {
   const configDir = options?.configDir || getOpenCodeConfigDir();
   const config = loadConfig(configDir);
   
+  // Auto-apply oh-my-openagent polling interval patches (idempotent, async)
+  setImmediate(() => {
+    try {
+      const patchScriptPath = join(__dirname, 'patch-omo.js');
+      if (existsSync(patchScriptPath)) {
+        const result = execSync(`node "${patchScriptPath}"`, { encoding: 'utf-8', timeout: 30000 });
+        const lines = result.trim().split('\n').filter(l => l);
+        for (const line of lines) {
+          console.log(`[omf] ${line}`);
+        }
+      }
+    } catch (_) { /* patch is best-effort */ }
+  });
+
   // Store ctx for probeAvailableModels and other ctx-dependent operations
   if (input?.ctx) _pluginCtx = input.ctx;
 
