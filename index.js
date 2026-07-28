@@ -1258,7 +1258,7 @@ function isRetryableError(error, retryOnErrors) {
 
   // Resource exhaustion (worker limit, quota) — checked before MessageAbortedError
   // so that OpenCode's abort wrapping doesn't silently skip fallback.
-  if (/resourceexhausted|worker.*total.*request.*limit/i.test(errorText)) return true;
+  if (/resourceexhausted|worker.*total.*request.*limit|request rate exceeds the current model tpm limit/i.test(errorText)) return true;
 
   // NotFoundError — OpenCode may wrap model-not-found as MessageAbortedError.
   // Check before the exclusion so a gone model still triggers fallback.
@@ -1290,7 +1290,7 @@ const REFUSAL_PATTERNS = [
   /^I cannot (fulfill|complete|process|answer|provide)/i,
   /^I('m| am) not (able|designed|equipped) to/i,
   /^As an AI (assistant|language model)/i,
-  /(rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i,
+  /(rate|request rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i,
   /(limit|quota|额度|余额).*(exceeded|reached|失败|不足|耗尽)/i,
   /insufficient.*(quota|balance|credit|额度|余额)/i,
 ];
@@ -1299,7 +1299,7 @@ function isUsageLimitResponse(text) {
   return /(rate|usage|free|额度).*(limit|exceeded|quota|失败|不足)/i.test(text) ||
     /(limit|quota|额度|余额).*(exceeded|reached|失败|不足|耗尽)/i.test(text) ||
     /insufficient.*(quota|balance|credit|额度|余额)/i.test(text) ||
-    /resourceexhausted|worker.*total.*request.*limit/i.test(text);
+    /resourceexhausted|worker.*total.*request.*limit|request rate exceeds the current model tpm limit/i.test(text);
 }
 
 function isAbnormalResponse(messageInfo, detectConfig) {
