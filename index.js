@@ -417,10 +417,12 @@ async function discoverProviderApiModels(configDir, verbose = false) {
     }
 
     const lines = output.trim().split('\n').filter(Boolean);
-    
+
+    // Filter out plugin log lines ([omf], [patch-omo], etc.) mixed into
+    // subprocess stdout, and any line that is not a provider/model ID.
     const models = lines
       .map(id => id.trim())
-      .filter(Boolean)
+      .filter(id => id.includes('/') && !/^\[/.test(id))
       .map(id => ({
         id,
         name: id.split('/').pop() || id,
@@ -446,7 +448,8 @@ function parseVerboseModelOutput(output) {
     if (!line) { i++; continue; }
 
     // Model ID line has format "provider/model-name"
-    if (line.includes('/')) {
+    // Skip plugin log lines ([omf], [patch-omo], etc.) mixed into stdout.
+    if (line.includes('/') && !/^\[/.test(line)) {
       const modelId = line;
       i++;
       const jsonLines = [];
