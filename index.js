@@ -203,7 +203,7 @@ const OMO_MODEL_DB = {
     /claude-opus/,
     /glm-5\.1/,
     /glm-5\.2/,
-    /minimax-m3/,
+    /minimax-m[23]/,
     /stepfun-ai\/step-3\.7/,
     /sensenova\//,
     /gemma-4/,
@@ -270,7 +270,7 @@ const OMO_MODEL_DB = {
     /mistral-small-4/,
     /sensenova-/,
     /sensenova\//,
-    /minimax-m[23]/,
+    /minimax-m1/,
     /deepseek-v4-flash/,
   ],
       score: 60,
@@ -2304,10 +2304,10 @@ function updateOmoModels(omoConfigPath, availableModelIds) {
  * Sends a minimal "." prompt via session.promptAsync with timeout.
  * @param {object} modelInfo - { id, providerID, modelID }
  * @param {object} ctx - plugin context (input.ctx)
- * @param {number} timeoutMs - timeout in ms (default 15000)
+ * @param {number} timeoutMs - timeout in ms (default 10000)
  * @returns {Promise<{ ok: boolean, modelId: string, error?: string }>}
  */
-async function probeModel(modelInfo, ctx, timeoutMs = 15000) {
+async function probeModel(modelInfo, ctx, timeoutMs = 10000) {
   const modelId = modelInfo.id;
   const providerID = modelInfo.providerID || modelId.split('/')[0];
   const modelID = modelId.split('/').slice(1).join('/');
@@ -2362,7 +2362,7 @@ async function probeModel(modelInfo, ctx, timeoutMs = 15000) {
  * @param {string|null} configDir - omf config dir (pass to persist probe results)
  * @returns {Promise<object[]>} models that passed the probe
  */
-async function probeAvailableModels(candidateModels, ctx, timeoutMs = 15000, configDir = null) {
+async function probeAvailableModels(candidateModels, ctx, timeoutMs = 10000, configDir = null) {
   const results = [];
   const failed = [];
   
@@ -2489,7 +2489,7 @@ async function tuiInit(configDir, config) {
   // statistics used by evolveFallbackChain() and autoOptimizeConfig().
   if (_pluginCtx && candidateModels.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 15000, configDir);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 10000, configDir);
     if (candidateModels.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
@@ -2639,7 +2639,7 @@ async function runInit(configDir, config) {
   // statistics used by evolveFallbackChain() and autoOptimizeConfig().
   if (_pluginCtx && candidateModels.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 15000, configDir);
+    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 10000, configDir);
     if (candidateModels.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
