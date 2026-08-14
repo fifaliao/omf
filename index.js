@@ -1257,10 +1257,17 @@ function isRetryableError(error, retryOnErrors) {
   // Build error text early to allow MessageAbortedError content inspection.
   // OpenCode wraps resource-exhaustion / worker-limit errors as MessageAbortedError,
   // so we must check for those patterns BEFORE the MessageAbortedError exclusion.
+  // Also flatten nested OpenAI-style envelopes: { error: { type, message } } or
+  // { data: { error: { type, message } } } — e.g. CreditsError is nested there and
+  // would otherwise never reach the pattern checks below.
   const errorText = [
     error.message,
     error.data?.message,
     error.data?.detail,
+    error.data?.error?.message,
+    error.data?.error?.type,
+    error.error?.message,
+    error.error?.type,
     error.name,
     typeof error.data === 'string' ? error.data : null,
     typeof error === 'string' ? error : null,
@@ -1269,6 +1276,10 @@ function isRetryableError(error, retryOnErrors) {
   // Resource exhaustion (worker limit, quota) — checked before MessageAbortedError
   // so that OpenCode's abort wrapping doesn't silently skip fallback.
   if (/resourceexhausted|worker.*total.*request.*limit|request rate exceeds the current model tpm limit/i.test(errorText)) return true;
+
+  // Account-level failure (no payment method / insufficient credits / billing):
+  // the model can never respond until the user pays, so fall back to another model.
+  if (/creditserror|no payment method|add a payment method|payment method.*required|payment.*(method|required)|insufficient.*credit|billing/i.test(errorText)) return true;
 
   // NotFoundError — OpenCode may wrap model-not-found as MessageAbortedError.
   // Check before the exclusion so a gone model still triggers fallback.
