@@ -2556,6 +2556,97 @@ async function probeAvailableModels(candidateModels, ctx, timeoutMs = 10000, con
   return results;
 }
 
+// ─── CLI-based model probing (no plugin context required) ────────────────────
+//
+// probeModel()/probeAvailableModels() above rely on ctx.client.session and only
+// run inside a live OpenCode session. probeModelViaCLI()/probeAvailableModelsViaCLI()
+// shell out to `opencode run --pure` instead, so they work standalone (e.g.
+// /omf init from a plain terminal) and reflect real API availability.
+//
+// NOTE: execSync is used (not spawn) because spawn()ing the opencode CLI hangs
+// on Windows when there is no console window, while execSync (shelled through
+// cmd.exe) returns reliably. Verified: node spawn → 40s hang; execSync → ~14s OK.
+
+const PROBE_PROMPT = 'reply with exactly: PONG';
+const PROBE_ERROR_PATTERN =
+  /(?:Unauthorized|not found|NotFound|404|429|timed? ?out|rate limit|CreditsError|billing|insufficient|no payment|forbidden|Gone|410|AI_APICallError[^\n]{0,60})/i;
+
+/**
+ * Probe a single model via `opencode run --pure` subprocess.
+ * @param {string} modelId - full model ID (e.g. 'opencode/big-pickle')
+ * @param {number} timeoutMs - per-model timeout (default 40000ms)
+ * @returns {{ok: boolean, modelId: string, error: string|null, latency: number}}
+ */
+function probeModelViaCLI(modelId, timeoutMs = 40000) {
+  const start = Date.now();
+  try {
+    execSync(`opencode run --pure -m ${modelId} "${PROBE_PROMPT}"`, {
+      encoding: 'utf-8',
+      timeout: timeoutMs,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, modelId, error: null, latency: Date.now() - start };
+  } catch (e) {
+    const combined = ((e.stderr || '').toString()) + ((e.stdout || '').toString());
+    const m = combined.match(PROBE_ERROR_PATTERN);
+    return {
+      ok: false,
+      modelId,
+      error: m ? m[0].trim().slice(0, 100) : (e.status ? `exit ${e.status}` : 'timeout'),
+      latency: Date.now() - start,
+    };
+  }
+}
+
+/**
+ * Probe all candidate models via CLI subprocess (bounded concurrency) and
+ * return only those that respond successfully. Results are recorded to
+ * evolve.jsonl when configDir is provided.
+ * @param {string[]} candidateIds - model IDs to probe
+ * @param {string|null} configDir - omf config dir (pass to persist results)
+ * @param {{concurrency?: number, timeoutMs?: number}} [options]
+ * @returns {Promise<string[]>} model IDs that passed the probe
+ */
+async function probeAvailableModelsViaCLI(candidateIds, configDir = null, options = {}) {
+  const concurrency = Math.max(1, options.concurrency || 3);
+  const timeoutMs = options.timeoutMs || 40000;
+  const ids = [...candidateIds];
+  const results = [];
+  const failed = [];
+
+  console.log(`[omf] Probing ${ids.length} models via CLI (concurrency ${concurrency}, timeout ${timeoutMs}ms)...`);
+
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, ids.length) }, async () => {
+    while (idx < ids.length) {
+      const id = ids[idx++];
+      const result = probeModelViaCLI(id, timeoutMs);
+      if (configDir) {
+        recordModelOutcome(configDir, id, result.ok, result.latency || 0, result.error);
+      }
+      if (result.ok) {
+        results.push(id);
+        console.log(`[omf]   ✓ ${id} (${result.latency}ms)`);
+      } else {
+        failed.push({ id, error: result.error });
+        console.log(`[omf]   ✗ ${id} — ${result.error}`);
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  console.log(`[omf] Probe complete: ${results.length}/${ids.length} models available`);
+  if (failed.length > 5) {
+    console.log(`[omf]   ✗ ${failed.length} models failed (showing first 5):`);
+    failed.slice(0, 5).forEach(f => console.log(`[omf]     ${f.id}: ${f.error}`));
+  } else if (failed.length > 0) {
+    failed.forEach(f => console.log(`[omf]     ${f.id}: ${f.error}`));
+  }
+
+  return results;
+}
+
 // ─── Init: Discover & Configure ─────────────────────────────────────────────
 
 async function tuiInit(configDir, config) {
@@ -2644,19 +2735,15 @@ async function tuiInit(configDir, config) {
   // ─── Step 3b: Real API probe to verify models actually respond ───
   // Each probe result is recorded to evolve.jsonl so it seeds the performance
   // statistics used by evolveFallbackChain() and autoOptimizeConfig().
-  if (_pluginCtx && candidateModels.length > 0) {
+  // CLI-based probing (`opencode run --pure`) works standalone — no plugin
+  // context required, and reflects real API availability.
+  if (candidateIds.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 10000, configDir);
-    if (candidateModels.length === 0) {
+    candidateIds = await probeAvailableModelsViaCLI(candidateIds, configDir, { concurrency: 3, timeoutMs: 40000 });
+    if (candidateIds.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
     }
-    // Recalculate candidateIds from probed models
-    candidateIds = candidateModels.map(m => m.id);
-  } else if (!_pluginCtx) {
-    console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
-    console.log(`[omf] WARNING: Without probing, the chain may include non-working models.`);
-    console.log(`[omf] Run /omf init again from within OpenCode to enable availability verification.`);
   }
 
   // ─── Step 4: Get omo model requirements ───
@@ -2794,19 +2881,15 @@ async function runInit(configDir, config) {
   // ─── Step 3b: Real API probe to verify models actually respond ───
   // Each probe result is recorded to evolve.jsonl so it seeds the performance
   // statistics used by evolveFallbackChain() and autoOptimizeConfig().
-  if (_pluginCtx && candidateModels.length > 0) {
+  // CLI-based probing (`opencode run --pure`) works standalone — no plugin
+  // context required, and reflects real API availability.
+  if (candidateIds.length > 0) {
     console.log(`\n[omf] ─── Step 3b: Probing model availability (real API calls) ───`);
-    candidateModels = await probeAvailableModels(candidateModels, _pluginCtx, 10000, configDir);
-    if (candidateModels.length === 0) {
+    candidateIds = await probeAvailableModelsViaCLI(candidateIds, configDir, { concurrency: 3, timeoutMs: 40000 });
+    if (candidateIds.length === 0) {
       console.log(`[omf] No models passed the probe. Aborting.`);
       return false;
     }
-    // Recalculate candidateIds from probed models
-    candidateIds = candidateModels.map(m => m.id);
-  } else if (!_pluginCtx) {
-    console.log(`[omf] ─── Step 3b: Skipping probe (no plugin context — running standalone) ───`);
-    console.log(`[omf] WARNING: Without probing, the chain may include non-working models.`);
-    console.log(`[omf] Run /omf init again from within OpenCode to enable availability verification.`);
   }
 
   // ─── Step 4: Read standard omo config + update to available models ───
@@ -3236,6 +3319,8 @@ const pluginApi = {
   evolveFallbackChain,
   probeModel,
   probeAvailableModels,
+  probeModelViaCLI,
+  probeAvailableModelsViaCLI,
   getSessionModel,
 };
 Object.assign(plugin, pluginApi);

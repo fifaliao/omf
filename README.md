@@ -199,7 +199,7 @@ TUI 支持：
 
 1. **发现** → 通过 `opencode models` CLI 获取所有可用模型
 2. **过滤** → 按状态（active/inactive）和费用（免费/付费）过滤
-3. **探测**（Step 3b）→ **对每个候选模型发送真实 API 请求**，验证是否实际可用
+3. **探测**（Step 3b）→ **对每个候选模型发送真实 API 请求**，验证是否实际可用。探测通过 `opencode run --pure` 子进程执行（`probeAvailableModelsViaCLI`），不依赖插件运行时上下文——在任意终端下运行 `/omf init` 也能完整探测
 4. **构建链表** → 仅使用通过探测的模型构建回退链
 
 每个探测结果都会写入 `evolve.jsonl`，作为进化系统的种子数据。探测失败或超时的模型会被自动排除，确保链中不包含不可用的模型。
@@ -399,8 +399,10 @@ session.error（transport 层）:
 | `analyzeModelPerformance(configDir, minObservations)` | 分析进化数据 |
 | `evolveFallbackChain(configDir, config)` | 运行自进化 |
 | `getEvolveLogPath(configDir)` | 获取进化日志路径 |
-| `probeModel(modelInfo, ctx, timeoutMs)` | 探测单个模型可用性（发送 "." 并等待 15s） |
-| `probeAvailableModels(candidates, ctx, timeoutMs, configDir)` | 探测所有候选模型；当传入 configDir 时将结果记录到 evolve.jsonl |
+| `probeModel(modelInfo, ctx, timeoutMs)` | 探测单个模型可用性（发送 "." 并等待 15s，需插件上下文） |
+| `probeAvailableModels(candidates, ctx, timeoutMs, configDir)` | 探测所有候选模型；当传入 configDir 时将结果记录到 evolve.jsonl（需插件上下文） |
+| `probeModelViaCLI(modelId, timeoutMs)` | CLI 探测单个模型（`opencode run --pure`，无插件上下文依赖；Windows 下用 execSync 而非 spawn） |
+| `probeAvailableModelsViaCLI(candidateIds, configDir, options)` | CLI 并发探测所有候选模型（`concurrency` 默认 3）；通过探测的模型写入 evolve.jsonl，`/omf init` 使用此路径 |
 | `getSessionModel(sessionID, state, configDir)` | 从会话 ID 解析当前模型（支持 omo agent 配置查找） |
 | `TIER_SCORES` | 层级分映射 `{ premium: 100, balanced: 80, fast: 60, cheap: 40 }` |
 | `EVOLVE_DEFAULTS` | 自进化默认配置对象 |
