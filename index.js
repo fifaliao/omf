@@ -991,8 +991,18 @@ function analyzeModelPerformance(configDir, minObservations) {
 }
 
 function discoverNewModels(knownModels, configDir) {
+  // Guard against recursive spawn: `opencode models` itself loads this plugin,
+  // which would re-enter evolveFallbackChain → discoverNewModels → spawn yet
+  // another `opencode models`, spawning unbounded processes (~400MB each) every
+  // few seconds until the machine grinds to a halt. The env flag is inherited by
+  // the child, so its plugin load skips discovery and the chain terminates.
+  if (process.env.OMF_DISCOVERY_GUARD === '1') return [];
   try {
-    const output = execSync('opencode models', { encoding: 'utf-8', timeout: 15000 });
+    const output = execSync('opencode models', {
+      encoding: 'utf-8',
+      timeout: 15000,
+      env: { ...process.env, OMF_DISCOVERY_GUARD: '1' },
+    });
     const lines = output.trim().split('\n').filter(Boolean);
     return lines
       .map(l => l.trim())
