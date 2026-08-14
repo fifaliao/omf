@@ -1314,6 +1314,10 @@ function isAbnormalResponse(messageInfo, detectConfig) {
     return { reason: 'empty', detail: 'empty response' };
   }
 
+  // Streaming guard: skip content checks on mid-stream fragments. A very short
+  // text is almost certainly partial output, not a real abnormal response.
+  if (text.trim().length < 30) return null;
+
   if (detectConfig.refusal || detectConfig.usage_limit) {
     const trimmed = text.trim();
     if (isUsageLimitResponse(trimmed)) {
@@ -1343,7 +1347,7 @@ function isAbnormalResponse(messageInfo, detectConfig) {
   }
 
   // Model EOL / Gone responses (410 Gone, 404 Not Found: model no longer available)
-  if (/gone|410.*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol|not found|404.*model/i.test(text.trim())) {
+  if (/(?:410|gone).*model.*(no longer|not available)|model.*(no longer available|deprecated|eol|end of life)|has reached.*eol|404.*model|model.*not found/i.test(text.trim())) {
     return { reason: 'model_gone', detail: 'model is deprecated or no longer available' };
   }
 
@@ -1352,8 +1356,11 @@ function isAbnormalResponse(messageInfo, detectConfig) {
     return { reason: 'degraded', detail: 'model is degraded/unavailable' };
   }
 
-  // Server error text — catch 5xx / "Internal server error" returned as model response content
-  if (/internal server error|internal error|500|bad gateway|502|503|504/i.test(text.trim())) {
+  // Server error text — catch 5xx / "Internal server error" returned as model response content.
+  // NOTE: bare status numbers are NOT matched alone — they are far too common in legitimate
+  // technical responses (durations, HTTP discussions) and caused false-positive fallbacks.
+  // Only match when the number carries explicit error context (status/code/http/error).
+  if (/internal server error|internal error|bad gateway|service unavailable|(?:http(?: status)?|status(?: code)?|error(?: code)?|code)[:\s]*(?:is\s*)?[45]\d\d/i.test(text.trim())) {
     return { reason: 'server_error', detail: 'provider returned server error in response content' };
   }
 
@@ -1833,7 +1840,7 @@ const plugin = async (input, options) => {
           // error object structure.
           const parts = info.parts || [];
           const text = parts.filter(p => p.type === 'text').map(p => p.text || '').join('');
-          if (/internal server error|internal error|500|bad gateway|502|503|504/i.test(text.trim())) {
+          if (/internal server error|internal error|bad gateway|service unavailable|(?:http(?: status)?|status(?: code)?|error(?: code)?|code)[:\s]*(?:is\s*)?[45]\d\d/i.test(text.trim())) {
             console.log(`[omf] ${sessionID}: server error text detected in response content despite non-retryable error`);
             recordSessionModel(sessionID, false, 'server_error_text');
             await tryManualFallback(input, sessionID);
