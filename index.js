@@ -45,6 +45,15 @@ function getOpenCodeConfigDir() {
 
 // ─── Default configuration ────────────────────────────────────────────────────
 
+// ─── Runtime log gating ──────────────────────────────────────────────────────
+// [omf] logs are SILENT by default so they never pollute the TUI bottom bar
+// during fallback. Enable with "options": { "debug": true } in omf.json.
+// TUI/command output (showStatus, /omf ...) always prints via console.log directly.
+let omfDebugEnabled = false;
+function omfLog(...args) {
+  if (omfDebugEnabled) console.log(...args);
+}
+
 const defaultConfig = {
 fallback_models: {
 default: [
@@ -86,6 +95,7 @@ default: [
     cooldown_seconds: 30,
     retry_on_errors: [404, 410, 429, 500, 502, 503, 504],
     notify_on_fallback: true,
+    debug: false,
     auto_optimize: false,
     detect: {
       empty: true,
@@ -368,7 +378,7 @@ function loadConfig(configDir) {
     try {
       const userConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
       config = deepMerge(config, userConfig);
-      console.log(`[omf] Loaded config from ${configPath}`);
+      omfLog(`[omf] Loaded config from ${configPath}`);
     } catch (e) {
       console.error(`[omf] Failed to parse ${configPath}:`, e.message);
     }
@@ -376,7 +386,7 @@ function loadConfig(configDir) {
     try {
       mkdirSync(configDir, { recursive: true });
       writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Created default config at ${configPath}`);
+      omfLog(`[omf] Created default config at ${configPath}`);
     } catch (e) {
       console.error(`[omf] Failed to write default config:`, e.message);
     }
@@ -402,7 +412,7 @@ async function discoverProviderApiModels(configDir, verbose = false) {
       const free = models.filter(m => m.status === 'active' && m.cost?.input === 0 && m.cost?.output === 0).length;
       const paid = models.filter(m => m.cost && (m.cost.input > 0 || m.cost.output > 0)).length;
       const inactive = models.filter(m => m.status && m.status !== 'active').length;
-      console.log(`[omf] Discovered ${models.length} models via CLI (${free} free, ${paid} paid, ${inactive} inactive)`);
+      omfLog(`[omf] Discovered ${models.length} models via CLI (${free} free, ${paid} paid, ${inactive} inactive)`);
       return models;
     }
 
@@ -418,10 +428,10 @@ async function discoverProviderApiModels(configDir, verbose = false) {
         source: 'cli',
       }));
 
-    console.log(`[omf] Discovered ${models.length} models via \`opencode models\` CLI`);
+    omfLog(`[omf] Discovered ${models.length} models via \`opencode models\` CLI`);
     return models;
   } catch (e) {
-    console.log(`[omf] \`opencode models\` CLI failed: ${e.message}`);
+    omfLog(`[omf] \`opencode models\` CLI failed: ${e.message}`);
     return [];
   }
 }
@@ -694,17 +704,17 @@ async function autoOptimizeConfig(configDir, config) {
     try {
       apiModelObjs = await discoverProviderApiModels(configDir);
     } catch (e) {
-      console.log(`[omf] Provider API discovery skipped: ${e.message}`);
+      omfLog(`[omf] Provider API discovery skipped: ${e.message}`);
     }
     const apiModelIds = apiModelObjs.map(m => m.id);
     const availableModels = apiModelIds;
 
     if (availableModels.length === 0) {
-      console.log(`[omf] No models found via \`opencode models\` CLI`);
+      omfLog(`[omf] No models found via \`opencode models\` CLI`);
       return;
     }
 
-    console.log(`[omf] Auto-optimize: ${availableModels.length} models discovered via CLI`);
+    omfLog(`[omf] Auto-optimize: ${availableModels.length} models discovered via CLI`);
 
     // Update model_tiers in config for visibility
     const newTiers = { premium: [], balanced: [], fast: [], cheap: [] };
@@ -802,7 +812,7 @@ async function autoOptimizeConfig(configDir, config) {
     const optimizedSorted = [...optimizedChain].sort().join(',');
 
     if (currentSorted === optimizedSorted) {
-      console.log(`[omf] Auto-optimize: fallback chain unchanged`);
+      omfLog(`[omf] Auto-optimize: fallback chain unchanged`);
       const configPath = join(configDir, 'omf.json');
       if (existsSync(configPath)) {
         try {
@@ -821,12 +831,12 @@ async function autoOptimizeConfig(configDir, config) {
       strategy: config.fallback_chain?.strategy || 'performance'
     };
 
-    console.log(`[omf] Auto-optimized fallback chain structure:`);
+    omfLog(`[omf] Auto-optimized fallback chain structure:`);
     let current = config.fallback_chain.head;
     let index = 1;
     while (current) {
       const next = links[current] || 'END';
-      console.log(`[omf]   ${index}. ${current} → ${next}`);
+      omfLog(`[omf]   ${index}. ${current} → ${next}`);
       current = next === 'END' ? null : links[current];
       index++;
     }
@@ -835,7 +845,7 @@ async function autoOptimizeConfig(configDir, config) {
     if (existsSync(configPath)) {
       try {
         writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-        console.log(`[omf] Saved optimized config to omf.json`);
+        omfLog(`[omf] Saved optimized config to omf.json`);
       } catch (e) {
         console.error(`[omf] Failed to write optimized config: ${e.message}`);
       }
@@ -874,7 +884,7 @@ function logModelOutcome(configDir, modelName, success, latencyMs, errorCode) {
   try {
     appendFileSync(logPath, JSON.stringify(entry) + '\n', 'utf-8');
   } catch (e) {
-    console.log(`[omf] Failed to log evolve entry: ${e.message}`);
+    omfLog(`[omf] Failed to log evolve entry: ${e.message}`);
   }
 }
 
@@ -907,9 +917,9 @@ function ensureModelStatsLoaded(configDir) {
       } catch { /* skip malformed lines */ }
     }
     modelStats.loaded = true;
-    console.log(`[omf] Loaded ${lines.length} evolve entries (${modelStats.data.size} models)`);
+    omfLog(`[omf] Loaded ${lines.length} evolve entries (${modelStats.data.size} models)`);
   } catch (e) {
-    console.log(`[omf] Failed to load evolve data: ${e.message}`);
+    omfLog(`[omf] Failed to load evolve data: ${e.message}`);
     modelStats.loaded = true;
   }
 }
@@ -985,7 +995,7 @@ function analyzeModelPerformance(configDir, minObservations) {
         return a.avgLatency - b.avgLatency;
       });
   } catch (e) {
-    console.log(`[omf] Evolution analysis failed: ${e.message}`);
+    omfLog(`[omf] Evolution analysis failed: ${e.message}`);
     return [];
   }
 }
@@ -1040,7 +1050,7 @@ function discoverAgentEntries(configDir) {
       }
     }
   } catch (e) {
-    console.log(`[omf] Failed to read agent entries: ${e.message}`);
+    omfLog(`[omf] Failed to read agent entries: ${e.message}`);
   }
 
   return entries;
@@ -1086,7 +1096,7 @@ function evolveFallbackChain(configDir, config) {
   if (evolveOpts.new_model_behavior === 'append') {
     newModels = discoverNewModels(order, configDir);
     if (newModels.length > 0) {
-      console.log(`[omf] Discovered new model(s): ${newModels.join(', ')}`);
+      omfLog(`[omf] Discovered new model(s): ${newModels.join(', ')}`);
     }
   }
 
@@ -1102,12 +1112,12 @@ function evolveFallbackChain(configDir, config) {
     config.fallback_chain.head = newOrder[0];
     config.fallback_models.default = newOrder;
 
-    console.log(`[omf] Evolved fallback chain: [${newOrder.join(', ')}]`);
+    omfLog(`[omf] Evolved fallback chain: [${newOrder.join(', ')}]`);
 
     const configPath = join(configDir, 'omf.json');
     try {
       writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Saved evolved config to omf.json`);
+      omfLog(`[omf] Saved evolved config to omf.json`);
     } catch (e) {
       console.error(`[omf] Failed to save evolved config: ${e.message}`);
     }
@@ -1491,11 +1501,11 @@ function disableOmoHooks(configDir) {
 
     if (changed) {
       writeFileSync(omoPath, JSON.stringify(cfg, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Disabled omo hooks in ${omoPath}`);
+      omfLog(`[omf] Disabled omo hooks in ${omoPath}`);
       return true;
     }
   } catch (e) {
-    console.log(`[omf] Failed to disable omo hooks: ${e.message}`);
+    omfLog(`[omf] Failed to disable omo hooks: ${e.message}`);
   }
   return false;
 }
@@ -1510,10 +1520,10 @@ function cleanOmoFallbacks(configDir) {
     if (omfConfig.fallback_models?.agents) {
       delete omfConfig.fallback_models.agents;
       writeFileSync(omfConfigPath, JSON.stringify(omfConfig, null, 2) + '\n', 'utf-8');
-      console.log(`[omf] Cleaned legacy agents config from omf.json`);
+      omfLog(`[omf] Cleaned legacy agents config from omf.json`);
     }
   } catch (e) {
-    console.log(`[omf] Failed to clean omf.json: ${e.message}`);
+    omfLog(`[omf] Failed to clean omf.json: ${e.message}`);
   }
 }
 
@@ -1532,7 +1542,7 @@ function scheduleOmoWatchdog(configDir) {
     attempts++;
     const applied = disableOmoHooks(configDir);
     if (applied) {
-      console.log(`[omf] Watchdog re-applied omo hook disable (attempt ${attempts})`);
+      omfLog(`[omf] Watchdog re-applied omo hook disable (attempt ${attempts})`);
     }
     if (attempts >= OMO_WATCHDOG_RETRIES) {
       clearInterval(id);
@@ -1547,7 +1557,8 @@ function scheduleOmoWatchdog(configDir) {
 const plugin = async (input, options) => {
   const configDir = options?.configDir || getOpenCodeConfigDir();
   const config = loadConfig(configDir);
-  
+  omfDebugEnabled = config.options?.debug === true;
+
   // Auto-apply oh-my-openagent polling interval patches (idempotent, async)
   setImmediate(() => {
     try {
@@ -1556,7 +1567,7 @@ const plugin = async (input, options) => {
         const result = execSync(`node "${patchScriptPath}"`, { encoding: 'utf-8', timeout: 30000 });
         const lines = result.trim().split('\n').filter(l => l);
         for (const line of lines) {
-          console.log(`[omf] ${line}`);
+          omfLog(`[omf] ${line}`);
         }
       }
     } catch (_) { /* patch is best-effort */ }
@@ -1611,7 +1622,7 @@ const plugin = async (input, options) => {
 
     if (state.pending) return;
     if (state.attemptCount >= config.options.max_retries) {
-      console.log(`[omf] ${sessionID}: max retries (${config.options.max_retries}) reached`);
+      omfLog(`[omf] ${sessionID}: max retries (${config.options.max_retries}) reached`);
       sessionStates.delete(sessionID);
       return;
     }
@@ -1635,7 +1646,7 @@ const plugin = async (input, options) => {
         if (!parsed) continue;
         const providerTs = state.failedProviders.get(parsed.providerID);
         if (providerTs && (Date.now() - providerTs) < providerCooldown) {
-          console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
+          omfLog(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
           continue;
         }
         candidates.push({
@@ -1646,7 +1657,7 @@ const plugin = async (input, options) => {
       candidates.sort((a, b) => b.score - a.score);
       nextModel = candidates[0]?.modelId || null;
       if (nextModel) {
-        console.log(`[omf] ${sessionID}: weighted selection → ${nextModel} (score: ${candidates[0].score.toFixed(1)} from ${candidates.length} candidates)`);
+        omfLog(`[omf] ${sessionID}: weighted selection → ${nextModel} (score: ${candidates[0].score.toFixed(1)} from ${candidates.length} candidates)`);
       }
     } else {
       // Linked list resolution: walk from current position (legacy mode)
@@ -1678,13 +1689,13 @@ const plugin = async (input, options) => {
         if (!parsed) continue;
         const providerTs = state.failedProviders.get(parsed.providerID);
         if (providerTs && (Date.now() - providerTs) < providerCooldown) {
-          console.log(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
+          omfLog(`[omf] Skipping ${candidate}: provider ${parsed.providerID} on circuit breaker`);
           continue;
         }
         if (config.options.health_check !== false) {
           const health = getRecentModelHealth(configDir, candidate, 3);
           if (health && health.failures >= 2 && health.total >= 2) {
-            console.log(`[omf] Skipping ${candidate}: recent health (${health.failures}/${health.total} failures)`);
+            omfLog(`[omf] Skipping ${candidate}: recent health (${health.failures}/${health.total} failures)`);
             state.failedModels.set(candidate, Date.now());
             continue;
           }
@@ -1699,11 +1710,11 @@ const plugin = async (input, options) => {
       state.exhaustionRounds = (state.exhaustionRounds || 0) + 1;
       const maxExhaustionRounds = 3;
       if (state.exhaustionRounds >= maxExhaustionRounds) {
-        console.log(`[omf] ${sessionID}: exhausted all models for ${maxExhaustionRounds} rounds — giving up`);
+        omfLog(`[omf] ${sessionID}: exhausted all models for ${maxExhaustionRounds} rounds — giving up`);
         sessionStates.delete(sessionID);
         return;
       }
-      console.log(`[omf] ${sessionID}: all models exhausted — clearing cooldowns, round ${state.exhaustionRounds}/${maxExhaustionRounds}`);
+      omfLog(`[omf] ${sessionID}: all models exhausted — clearing cooldowns, round ${state.exhaustionRounds}/${maxExhaustionRounds}`);
       state.failedModels.clear();
       state.failedProviders.clear();
       state.currentFallbackModel = null;
@@ -1736,7 +1747,7 @@ const plugin = async (input, options) => {
         .map((p) => ({ type: 'text', text: p.text }));
 
       if (parts.length === 0) {
-        console.log(`[omf] ${sessionID}: no user message to retry`);
+        omfLog(`[omf] ${sessionID}: no user message to retry`);
         state.pending = false;
         sessionStates.delete(sessionID);
         return;
@@ -1747,7 +1758,7 @@ const plugin = async (input, options) => {
       } catch (abortErr) {
         // Session was already aborted — expected in dual-hook env (omo's runtime-fallback).
         // Continue with retry regardless; abort is only needed to stop a running stream.
-        console.log(`[omf] ${sessionID}: abort coordination (session may already be handled): ${abortErr.message}`);
+        omfLog(`[omf] ${sessionID}: abort coordination (session may already be handled): ${abortErr.message}`);
       }
 
       const parsed = parseModelString(nextModel);
@@ -1763,7 +1774,7 @@ const plugin = async (input, options) => {
       recordModelOutcome(configDir, nextModel, true, Date.now() - fallbackStartTime);
       // Reset consecutive failure counter on success
       state[`consecutive_${nextModel}`] = 0;
-      console.log(`[omf] ${sessionID}: fallback → ${nextModel}`);
+      omfLog(`[omf] ${sessionID}: fallback → ${nextModel}`);
 
       if (config.options.notify_on_fallback) {
         try {
@@ -1781,7 +1792,7 @@ const plugin = async (input, options) => {
       }
     } catch (e) {
       recordModelOutcome(configDir, nextModel, false, Date.now() - fallbackStartTime, extractStatusCode(e));
-      console.log(`[omf] ${sessionID}: fallback attempt failed:`, e.message);
+      omfLog(`[omf] ${sessionID}: fallback attempt failed:`, e.message);
       state.failedModels.set(nextModel, Date.now());
       const failParsed = parseModelString(nextModel);
       if (failParsed) state.failedProviders.set(failParsed.providerID, Date.now());
@@ -1794,7 +1805,7 @@ const plugin = async (input, options) => {
       if (prevConsecutive >= 1) {
         // 2+ consecutive failures → sink this model to the end of the chain
         sinkModelToEnd(config, nextModel, configDir);
-        console.log(`[omf] ${sessionID}: model ${nextModel} failed ${prevConsecutive + 1}× consecutively — sunk to chain end`);
+        omfLog(`[omf] ${sessionID}: model ${nextModel} failed ${prevConsecutive + 1}× consecutively — sunk to chain end`);
       }
 
       state.pending = false;
@@ -1852,7 +1863,7 @@ const plugin = async (input, options) => {
           // it now would reproduce the original misfire — retry later instead.
           const completed = msg.info?.time?.completed;
           if (completed == null) {
-            console.log(`[omf] ${sid}: empty check deferred — message ${messageId} still in flight`);
+            omfLog(`[omf] ${sid}: empty check deferred — message ${messageId} still in flight`);
             return false;
           }
           const msgParts = msg.parts || msg.info?.parts || [];
@@ -1864,13 +1875,13 @@ const plugin = async (input, options) => {
             (p) => (p.text || '').trim().length > 0 || p.type !== 'text'
           );
           if (!hasAnyContent) {
-            console.log(`[omf] ${sid}: empty response confirmed (${messageId})`);
+            omfLog(`[omf] ${sid}: empty response confirmed (${messageId})`);
             recordSessionModel(sid, false, 'empty');
             await tryManualFallback(input, sid);
           }
           return true;
         } catch (e) {
-          console.log(`[omf] ${sid}: empty re-check failed:`, e.message);
+          omfLog(`[omf] ${sid}: empty re-check failed:`, e.message);
           return true; // settle — don't hot-loop on API errors
         }
       };
@@ -1902,7 +1913,7 @@ const plugin = async (input, options) => {
         // 1. Explicit error detection (status codes, provider errors)
         const error = info.error;
         if (error && isRetryableError(error, config.options.retry_on_errors)) {
-          console.log(`[omf] ${sessionID}: retryable error detected (${error.name})`);
+          omfLog(`[omf] ${sessionID}: retryable error detected (${error.name})`);
           recordSessionModel(sessionID, false, error.name);
           await tryManualFallback(input, sessionID);
           return;
@@ -1945,7 +1956,7 @@ const plugin = async (input, options) => {
 
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
-            console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
+            omfLog(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
             recordSessionModel(sessionID, false, abnormal.reason);
             await tryManualFallback(input, sessionID);
             return;
@@ -1957,7 +1968,7 @@ const plugin = async (input, options) => {
           const parts = info.parts || [];
           const text = parts.filter(p => p.type === 'text').map(p => p.text || '').join('');
           if (/internal server error|internal error|bad gateway|service unavailable|(?:http(?: status)?|status(?: code)?|error(?: code)?|code)[:\s]*(?:is\s*)?[45]\d\d/i.test(text.trim())) {
-            console.log(`[omf] ${sessionID}: server error text detected in response content despite non-retryable error`);
+            omfLog(`[omf] ${sessionID}: server error text detected in response content despite non-retryable error`);
             recordSessionModel(sessionID, false, 'server_error_text');
             await tryManualFallback(input, sessionID);
             return;
@@ -1980,12 +1991,12 @@ const plugin = async (input, options) => {
           const msg = (status.message || '').toLowerCase();
           // prettier-ignore
           if (/too many requests|rate limit|retrying in|429|500|free usage exceeded|connection closed|-32000|resourceexhausted|degraded|not found|model.*(gone|eol|deprecated)|请求过于频繁|频率超限|请求频率|配额不足|额度不足|rate.*limit|limit.*exceed|exhausted|internal server error|internal error|service unavailable|bad gateway|502|503|504/i.test(msg)) {
-            console.log(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
+            omfLog(`[omf] ${sessionID}: intercepting first retry (attempt ${status.attempt}) — ${status.message}`);
             recordSessionModel(sessionID, false, status.type);
             // Don't reset pending — let tryManualFallback's own pending check handle concurrency
             await tryManualFallback(input, sessionID);
           } else {
-            console.log(`[omf] ${sessionID}: session.status retry (attempt ${status.attempt}) received but message pattern not matched — ${status.message}`);
+            omfLog(`[omf] ${sessionID}: session.status retry (attempt ${status.attempt}) received but message pattern not matched — ${status.message}`);
           }
         }
       }
@@ -2005,7 +2016,7 @@ const plugin = async (input, options) => {
           delete state[k];
           const messageId = k.slice('emptyCheck_'.length);
           confirmEmptyAndFallback(sid, messageId).catch((e) =>
-            console.log(`[omf] ${sid}: idle empty-confirm failed:`, e.message)
+            omfLog(`[omf] ${sid}: idle empty-confirm failed:`, e.message)
           );
         }
       }
@@ -2017,7 +2028,7 @@ const plugin = async (input, options) => {
         const error = props.error;
         if (!error || !isRetryableError(error, config.options.retry_on_errors)) return;
 
-        console.log(`[omf] ${sessionID}: session error (${error.name}) — queuing fallback (deferred for coordination)`);
+        omfLog(`[omf] ${sessionID}: session error (${error.name}) — queuing fallback (deferred for coordination)`);
         recordSessionModel(sessionID, false, error.name);
 
         // Defer to end of macrotask queue so omo's runtime-fallback handler runs first.
@@ -2026,7 +2037,7 @@ const plugin = async (input, options) => {
         // fallback decision regardless of handler dispatch order.
         setTimeout(() => {
           tryManualFallback(input, sessionID).catch(err => {
-            console.log(`[omf] ${sessionID}: deferred fallback error:`, err.message);
+            omfLog(`[omf] ${sessionID}: deferred fallback error:`, err.message);
           });
         }, 0);
       }
