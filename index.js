@@ -3051,9 +3051,15 @@ async function handleCommand({ name, args }) {
   return { handled: false };
 }
 
-export {
+// ─── 编程 API ────────────────────────────────────────────────────────────────
+// 注意：opencode 的 legacy 插件加载器 (getLegacyPlugins) 要求模块的每个导出值
+// 都是函数或 { server: fn } 对象，任何非函数导出（对象/常量）都会导致
+// "Plugin export is not a function" 而整个插件加载失败。
+// 因此所有编程 API 挂载到 default 导出函数上，而不是作为独立具名导出。
+const pluginApi = {
   OMO_MODEL_DB,
   TIER_SCORES,
+  EVOLVE_DEFAULTS,
   classifyByCost,
   buildFallbackChain,
   discoverProviderApiModels,
@@ -3065,7 +3071,6 @@ export {
   runInit,
   runTUI,
   handleCommand,
-  EVOLVE_DEFAULTS,
   getEvolveLogPath,
   logModelOutcome,
   recordModelOutcome,
@@ -3076,4 +3081,6 @@ export {
   probeAvailableModels,
   getSessionModel,
 };
+Object.assign(plugin, pluginApi);
+
 export default plugin;

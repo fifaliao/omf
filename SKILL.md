@@ -108,7 +108,7 @@ cd <omf-plugin-dir> && bash install.sh --configure
 Or call the omf plugin's exported `runTUI` function:
 
 ```bash
-node -e "import('file://<omf-plugin-dir>/index.js').then(m => m.runTUI())"
+node -e "import('file://<omf-plugin-dir>/index.js').then(m => m.default.runTUI())"
 ```
 
 The TUI uses Node.js built-in `readline` — no external dependencies needed.
