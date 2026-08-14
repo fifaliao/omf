@@ -1819,6 +1819,66 @@ const plugin = async (input, options) => {
         }
       };
 
+      // Confirm a message is REALLY empty before falling back. Called only when the
+      // session has gone idle (all generation finished) or the timeout expired, so
+      // the stored message reflects its final state — streaming is no longer in
+      // flight, which is exactly why the old fixed 3s re-read misfired.
+      // Returns true when the check is settled (empty→fallback fired, or message
+      // has content, or message is gone), false when the message is still being
+      // generated and the check must be retried later.
+      const confirmEmptyAndFallback = async (sid, messageId) => {
+        try {
+          const msgsResp = await input.client.session.messages({
+            path: { id: sid },
+            query: { directory: input.directory },
+          });
+          const msgs = Array.isArray(msgsResp) ? msgsResp : msgsResp?.data;
+          const msg = (msgs || []).find((m) => m.info?.id === messageId);
+          // Message no longer exists — nothing to judge, settle the check.
+          if (!msg) return true;
+          // Message is NOT finished yet (e.g. slow first token): its parts are
+          // still empty purely because streaming hasn't produced output. Judging
+          // it now would reproduce the original misfire — retry later instead.
+          const completed = msg.info?.time?.completed;
+          if (completed == null) {
+            console.log(`[omf] ${sid}: empty check deferred — message ${messageId} still in flight`);
+            return false;
+          }
+          const msgParts = msg.parts || msg.info?.parts || [];
+          // Treat as "empty" only when the finished message has NO content at all:
+          // no text AND no non-text parts (tool calls, images, etc.). A message
+          // that only made tool calls is a legitimate completion, not an empty
+          // response — aborting it would break agent workflows.
+          const hasAnyContent = msgParts.some(
+            (p) => (p.text || '').trim().length > 0 || p.type !== 'text'
+          );
+          if (!hasAnyContent) {
+            console.log(`[omf] ${sid}: empty response confirmed (${messageId})`);
+            recordSessionModel(sid, false, 'empty');
+            await tryManualFallback(input, sid);
+          }
+          return true;
+        } catch (e) {
+          console.log(`[omf] ${sid}: empty re-check failed:`, e.message);
+          return true; // settle — don't hot-loop on API errors
+        }
+      };
+
+      // Schedule a deferred empty confirmation with bounded self-renewal. Cancelled
+      // as soon as the message receives real content (pending key removed), and
+      // re-armed while the message is still being generated.
+      const scheduleEmptyConfirm = (state, sid, messageId, delayMs) => {
+        setTimeout(async () => {
+          if (!state[`emptyCheck_${messageId}`]) return;
+          const settled = await confirmEmptyAndFallback(sid, messageId);
+          if (!settled && state[`emptyCheck_${messageId}`]) {
+            scheduleEmptyConfirm(state, sid, messageId, delayMs);
+          } else if (settled) {
+            delete state[`emptyCheck_${messageId}`];
+          }
+        }, delayMs);
+      };
+
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         if (!info || info.role !== 'assistant') return;
@@ -1848,8 +1908,10 @@ const plugin = async (input, options) => {
 
           // Streaming guard for EMPTY responses. An assistant message starts out
           // with no text parts, so a zero-length update is the normal streaming
-          // initialization — NOT a real empty response. Defer the empty check:
-          // re-read the message 3s later and only fall back if it is still empty.
+          // initialization — NOT a real empty response. Instead of judging the
+          // message immediately (or on a fixed timer), we mark it as pending and
+          // only confirm "empty" once the session goes idle (all generation done)
+          // or a 30s timeout elapses with the message still empty.
           if (detectConfig.empty && (!text || text.trim().length === 0)) {
             // Right after omf re-sends a message, its fresh assistant message is
             // necessarily empty — never treat that as a new failure (this prevents
@@ -1859,31 +1921,16 @@ const plugin = async (input, options) => {
             }
             const pendingKey = `emptyCheck_${info.id}`;
             if (!state[pendingKey]) {
-              state[pendingKey] = true;
-              setTimeout(async () => {
-                delete state[pendingKey];
-                try {
-                  const msgsResp = await input.client.session.messages({
-                    path: { id: sessionID },
-                    query: { directory: input.directory },
-                  });
-                  const msgs = Array.isArray(msgsResp) ? msgsResp : msgsResp?.data;
-                  const msg = (msgs || []).find((m) => m.info?.id === info.id);
-                  const msgParts = msg?.parts || msg?.info?.parts || [];
-                  const txt = msgParts
-                    .filter((p) => p.type === 'text')
-                    .map((p) => p.text || '')
-                    .join('');
-                  if (!txt || txt.trim().length === 0) {
-                    console.log(`[omf] ${sessionID}: empty response confirmed after 3s (${info.id})`);
-                    recordSessionModel(sessionID, false, 'empty');
-                    await tryManualFallback(input, sessionID);
-                  }
-                } catch { /* best-effort re-check */ }
-              }, 3000);
+              state[pendingKey] = { at: Date.now(), sessionID };
+              // Fallback timeout: if no message update (content or error) and no
+              // session.idle arrives within 30s, re-check the stored message.
+              // Self-renews while the message is still being generated.
+              scheduleEmptyConfirm(state, sessionID, info.id, 30000);
             }
             return;
           }
+          // Message has real content now — cancel any pending empty check for it.
+          if (state[`emptyCheck_${info.id}`]) delete state[`emptyCheck_${info.id}`];
 
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
@@ -1929,6 +1976,26 @@ const plugin = async (input, options) => {
           } else {
             console.log(`[omf] ${sessionID}: session.status retry (attempt ${status.attempt}) received but message pattern not matched — ${status.message}`);
           }
+        }
+      }
+
+      // Session went idle = all message generation has finished. This is the
+      // reliable "completion" signal for the deferred empty check: any assistant
+      // message that is STILL pending its empty confirmation at this point really
+      // ended up empty (streaming can no longer be in flight), so fall back on it.
+      if (event.type === 'session.idle') {
+        const props = event.properties;
+        if (!props?.sessionID) return;
+        const sid = props.sessionID;
+        const state = getOrCreateSessionState(sid);
+        const pendingKeys = Object.keys(state).filter((k) => k.startsWith('emptyCheck_'));
+        for (const k of pendingKeys) {
+          const rec = state[k];
+          delete state[k];
+          const messageId = k.slice('emptyCheck_'.length);
+          confirmEmptyAndFallback(sid, messageId).catch((e) =>
+            console.log(`[omf] ${sid}: idle empty-confirm failed:`, e.message)
+          );
         }
       }
 
