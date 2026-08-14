@@ -1703,6 +1703,7 @@ const plugin = async (input, options) => {
 
     state.pending = true;
     state.attemptCount++;
+    state.lastFallbackAt = Date.now();
     const fallbackStartTime = Date.now();
 
     try {
@@ -1825,6 +1826,8 @@ const plugin = async (input, options) => {
         const sessionID = info.sessionID;
         if (!sessionID) return;
 
+        const state = getOrCreateSessionState(sessionID);
+
         // 1. Explicit error detection (status codes, provider errors)
         const error = info.error;
         if (error && isRetryableError(error, config.options.retry_on_errors)) {
@@ -1837,6 +1840,51 @@ const plugin = async (input, options) => {
         // 2. Abnormal response detection (empty, refusal, usage limit)
         if (!error) {
           const detectConfig = config.options.detect;
+          const infoParts = info.parts || [];
+          const text = infoParts
+            .filter((p) => p.type === 'text')
+            .map((p) => p.text || '')
+            .join('');
+
+          // Streaming guard for EMPTY responses. An assistant message starts out
+          // with no text parts, so a zero-length update is the normal streaming
+          // initialization — NOT a real empty response. Defer the empty check:
+          // re-read the message 3s later and only fall back if it is still empty.
+          if (detectConfig.empty && (!text || text.trim().length === 0)) {
+            // Right after omf re-sends a message, its fresh assistant message is
+            // necessarily empty — never treat that as a new failure (this prevents
+            // the abort → re-send → empty → abort retry loop).
+            if (state.lastFallbackAt && Date.now() - state.lastFallbackAt < 5000) {
+              return;
+            }
+            const pendingKey = `emptyCheck_${info.id}`;
+            if (!state[pendingKey]) {
+              state[pendingKey] = true;
+              setTimeout(async () => {
+                delete state[pendingKey];
+                try {
+                  const msgsResp = await input.client.session.messages({
+                    path: { id: sessionID },
+                    query: { directory: input.directory },
+                  });
+                  const msgs = Array.isArray(msgsResp) ? msgsResp : msgsResp?.data;
+                  const msg = (msgs || []).find((m) => m.info?.id === info.id);
+                  const msgParts = msg?.parts || msg?.info?.parts || [];
+                  const txt = msgParts
+                    .filter((p) => p.type === 'text')
+                    .map((p) => p.text || '')
+                    .join('');
+                  if (!txt || txt.trim().length === 0) {
+                    console.log(`[omf] ${sessionID}: empty response confirmed after 3s (${info.id})`);
+                    recordSessionModel(sessionID, false, 'empty');
+                    await tryManualFallback(input, sessionID);
+                  }
+                } catch { /* best-effort re-check */ }
+              }, 3000);
+            }
+            return;
+          }
+
           const abnormal = isAbnormalResponse(info, detectConfig);
           if (abnormal) {
             console.log(`[omf] ${sessionID}: abnormal response (${abnormal.reason}) — ${abnormal.detail}`);
