@@ -2608,12 +2608,38 @@ function probeModelViaCLI(modelId, timeoutMs = 40000) {
  * @param {{concurrency?: number, timeoutMs?: number}} [options]
  * @returns {Promise<string[]>} model IDs that passed the probe
  */
+/**
+ * Kill orphaned `opencode run --pure` subprocesses left over from a previous
+ * interrupted probe run. These orphans hold the opencode database lock and
+ * cause subsequent probes to hang/timeout, so they must be cleared first.
+ * Only matches processes whose command line contains "run --pure" — the main
+ * OpenCode instance (serve/TUI) is never touched.
+ */
+function cleanupOrphanProbes() {
+  try {
+    if (process.platform === 'win32') {
+      // PowerShell filters opencode.exe by "run --pure" in its command line.
+      execSync(
+        `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='opencode.exe'\\" | Where-Object { $_.CommandLine -match 'run --pure' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
+        { encoding: 'utf-8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } else {
+      // Linux/macOS: pkill matching the probe subprocess pattern.
+      execSync(`pkill -f 'opencode run --pure'`, { encoding: 'utf-8', timeout: 15000 });
+    }
+  } catch (e) {
+    // pkill returns non-zero when no match; that's expected, ignore silently.
+  }
+}
+
 async function probeAvailableModelsViaCLI(candidateIds, configDir = null, options = {}) {
   const concurrency = Math.max(1, options.concurrency || 3);
   const timeoutMs = options.timeoutMs || 40000;
   const ids = [...candidateIds];
   const results = [];
   const failed = [];
+
+  cleanupOrphanProbes();
 
   console.log(`[omf] Probing ${ids.length} models via CLI (concurrency ${concurrency}, timeout ${timeoutMs}ms)...`);
 
@@ -3225,7 +3251,7 @@ async function handleCommand({ name, args }) {
       case 'setup': {
         const configDir = getOpenCodeConfigDir();
         const config = loadConfig(configDir);
-        await tuiInit(configDir, config);
+        await runInit(configDir, config);
         break;
       }
       case 'evolve': {
