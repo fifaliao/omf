@@ -108,7 +108,7 @@ default: [
     provider_cooldown_seconds: 60,
     server_url: 'http://127.0.0.1:4096',
     weights: {
-      enabled: true,
+      enabled: false,
       success_rate: 70,
       latency: 30,
       min_observations: 3,
